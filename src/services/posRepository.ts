@@ -27,6 +27,7 @@ import {
   BranchStock,
   CartItem,
   DiscountMode,
+  ImportProgress,
   ImportedCatalogRow,
   PaymentMethod,
   Product,
@@ -325,16 +326,17 @@ export async function replaceLegacyCafeWithHikemore(
 
   try {
     if (legacyProducts.length > 0) {
-      const delBatch = writeBatch(db);
-      for (const lp of legacyProducts) {
-        delBatch.delete(doc(db, 'products', lp.id));
+      const refsToDelete = [
+        ...legacyProducts.map((lp) => doc(db, 'products', lp.id)),
+        ...existingStocks
+          .filter((st) => legacyIds.has(st.productId))
+          .map((st) => doc(db, 'branchStocks', st.id)),
+      ];
+      for (let i = 0; i < refsToDelete.length; i += 350) {
+        const delBatch = writeBatch(db);
+        refsToDelete.slice(i, i + 350).forEach((ref) => delBatch.delete(ref));
+        await delBatch.commit();
       }
-      for (const st of existingStocks) {
-        if (legacyIds.has(st.productId)) {
-          delBatch.delete(doc(db, 'branchStocks', st.id));
-        }
-      }
-      await delBatch.commit();
     }
 
     const remainingProducts = existingProducts.filter(
@@ -783,10 +785,15 @@ export async function deleteBranchFromFirestore(
         where('branchId', '==', branchId)
       )
     );
-    const batch = writeBatch(db);
-    stockSnap.docs.forEach((d) => batch.delete(d.ref));
-    batch.delete(doc(db, 'branches', branchId));
-    await batch.commit();
+    const refs = [
+      ...stockSnap.docs.map((d) => d.ref),
+      doc(db, 'branches', branchId),
+    ];
+    for (let i = 0; i < refs.length; i += 350) {
+      const batch = writeBatch(db);
+      refs.slice(i, i + 350).forEach((ref) => batch.delete(ref));
+      await batch.commit();
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
@@ -1414,6 +1421,7 @@ export async function importCatalogRowsToFirestore(
     existingStocks: BranchStock[];
     includeSales: boolean;
     actorName: string;
+    onProgress?: (progress: ImportProgress) => void;
   }
 ): Promise<{
   branchesCreated: number;
@@ -1431,22 +1439,9 @@ export async function importCatalogRowsToFirestore(
   }
 
   const actor = (options.actorName.trim() || 'Admin').slice(0, DISPLAY_NAME_MAX);
-
-  // Build lookup maps
-  const branchByName = new Map<string, Branch>();
-  for (const b of options.existingBranches) {
-    branchByName.set(b.name.trim().toLowerCase(), b);
-  }
-
-  const productBySku = new Map<string, Product>();
-  for (const p of options.existingProducts) {
-    productBySku.set(p.sku.trim().toLowerCase(), p);
-  }
-
-  const stockByKey = new Map<string, BranchStock>();
-  for (const s of options.existingStocks) {
-    stockByKey.set(`${s.branchId}::${s.productId}`, s);
-  }
+  const report = (stage: string, current: number, total: number) => {
+    options.onProgress?.({ stage, current, total });
+  };
 
   let branchesCreated = 0;
   let productsUpserted = 0;
@@ -1454,11 +1449,75 @@ export async function importCatalogRowsToFirestore(
   let salesLinesImported = 0;
 
   try {
-    // PASS 1: Create any missing branches and upsert products (chunked to stay safely under 400 writes/batch)
+    report('Memeriksa data existing di Firebase...', 0, rows.length);
+
+    // Fetch live snapshots from Firestore so we never accidentally call set() with createdAt on an existing doc
+    const [liveBranchesSnap, liveProductsSnap, liveStocksSnap] =
+      await Promise.all([
+        getDocs(query(collection(db, 'branches'), where('ownerId', '==', ownerId))),
+        getDocs(query(collection(db, 'products'), where('ownerId', '==', ownerId))),
+        getDocs(
+          query(collection(db, 'branchStocks'), where('ownerId', '==', ownerId))
+        ),
+      ]);
+
+    const branchByName = new Map<string, Branch>();
+    const branchIds = new Set<string>();
+    liveBranchesSnap.docs.forEach((d) => {
+      const data = d.data();
+      const b: Branch = {
+        id: d.id,
+        ownerId,
+        code: String(data.code ?? 'BR'),
+        name: String(data.name ?? 'Cabang'),
+        address: String(data.address ?? ''),
+        active: Boolean(data.active ?? true),
+      };
+      branchByName.set(b.name.trim().toLowerCase(), b);
+      branchIds.add(d.id);
+    });
+
+    const productBySku = new Map<string, Product>();
+    const productById = new Map<string, Product>();
+    liveProductsSnap.docs.forEach((d) => {
+      const data = d.data();
+      const p: Product = {
+        id: d.id,
+        sku: String(data.sku ?? ''),
+        barcode: String(data.barcode ?? ''),
+        name: String(data.name ?? ''),
+        price: Number(data.price ?? 0),
+        image: String(data.image ?? ''),
+        category: sanitizeCategory(String(data.category ?? 'Umum')),
+      };
+      productById.set(d.id, p);
+      if (p.sku) {
+        productBySku.set(p.sku.trim().toLowerCase(), p);
+        const sanitizedKey = sanitizeCode(p.sku, SKU_MAX, '').toLowerCase();
+        if (sanitizedKey) productBySku.set(sanitizedKey, p);
+      }
+    });
+
+    const stockById = new Map<string, BranchStock>();
+    liveStocksSnap.docs.forEach((d) => {
+      const data = d.data();
+      stockById.set(d.id, {
+        id: d.id,
+        ownerId,
+        branchId: String(data.branchId ?? ''),
+        productId: String(data.productId ?? ''),
+        initialStock: Math.max(0, Number(data.initialStock ?? 0)),
+        currentStock: Math.max(0, Number(data.currentStock ?? 0)),
+        minThreshold: Math.max(0, Number(data.minThreshold ?? 2)),
+      });
+    });
+
+    // PASS 1A: Create any missing branches (chunked by 150)
     const uniqueBranchNames = Array.from(
       new Set(
-        rows
-          .map((r) => (r.branchName.trim() || DEFAULT_BRANCH.name).slice(0, BRANCH_NAME_MAX))
+        rows.map((r) =>
+          (r.branchName.trim() || DEFAULT_BRANCH.name).slice(0, BRANCH_NAME_MAX)
+        )
       )
     );
 
@@ -1467,191 +1526,334 @@ export async function importCatalogRowsToFirestore(
     );
 
     if (missingBranches.length > 0) {
-      const bBatch = writeBatch(db);
-      missingBranches.forEach((bName, i) => {
-        const bCode = sanitizeUpperCode(bName, BRANCH_CODE_MAX, `BR-${i + 1}`);
-        const bId = sanitizeId(
-          `${ownerId.slice(0, 8)}-${bCode.toLowerCase()}-${Date.now().toString().slice(-3)}${i}`,
-          'br'
-        );
-        bBatch.set(doc(db, 'branches', bId), {
-          ownerId,
-          code: bCode,
-          name: bName,
-          address: '',
-          active: true,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        branchByName.set(bName.toLowerCase(), {
-          id: bId,
-          ownerId,
-          code: bCode,
-          name: bName,
-          address: '',
-          active: true,
-        });
-        branchesCreated += 1;
-      });
-      await bBatch.commit();
-    }
-
-    // Deduplicate products by SKU across rows
-    const uniqueProductRows = new Map<string, ImportedCatalogRow>();
-    for (const r of rows) {
-      const key = r.sku.trim().toLowerCase();
-      if (!uniqueProductRows.has(key)) {
-        uniqueProductRows.set(key, r);
-      }
-    }
-
-    const prodEntries = Array.from(uniqueProductRows.entries());
-    for (let i = 0; i < prodEntries.length; i += 200) {
-      const chunk = prodEntries.slice(i, i + 200);
-      const pBatch = writeBatch(db);
-
-      for (const [skuKey, row] of chunk) {
-        const cleanSku = sanitizeCode(row.sku, SKU_MAX, `SKU-${i}`);
-        const cleanBarcode = sanitizeCode(
-          row.barcode || cleanSku,
-          BARCODE_MAX,
-          cleanSku
-        );
-        const cleanName = row.name.trim().slice(0, NAME_MAX) || cleanSku;
-        const cleanCategory = sanitizeCategory(row.category);
-        const cleanPrice = Math.min(
-          1000000000,
-          Math.max(0, Math.round(row.price))
-        );
-
-        const existing = productBySku.get(skuKey);
-        if (existing) {
-          pBatch.update(doc(db, 'products', existing.id), {
-            sku: cleanSku,
-            barcode: cleanBarcode,
-            name: cleanName,
-            price: cleanPrice > 0 ? cleanPrice : existing.price,
-            image: existing.image || '',
-            category: cleanCategory,
-            updatedAt: serverTimestamp(),
-          });
-          productBySku.set(skuKey, {
-            ...existing,
-            sku: cleanSku,
-            barcode: cleanBarcode,
-            name: cleanName,
-            price: cleanPrice > 0 ? cleanPrice : existing.price,
-            category: cleanCategory,
-          });
-        } else {
-          const newId = sanitizeId(
-            `${ownerId.slice(0, 8)}-${cleanSku.toLowerCase()}`,
-            'prod'
+      report('Membuat cabang baru...', 0, missingBranches.length);
+      for (let i = 0; i < missingBranches.length; i += 150) {
+        const chunk = missingBranches.slice(i, i + 150);
+        const bBatch = writeBatch(db);
+        chunk.forEach((bName, idx) => {
+          const bCode = sanitizeUpperCode(
+            bName,
+            BRANCH_CODE_MAX,
+            `BR-${i + idx + 1}`
           );
-          pBatch.set(doc(db, 'products', newId), {
+          let bId = sanitizeId(
+            `${ownerId.slice(0, 8)}-${bCode.toLowerCase()}-${Date.now().toString().slice(-3)}${i + idx}`,
+            'br'
+          );
+          while (branchIds.has(bId)) {
+            bId = sanitizeId(`${bId}-x`, 'br');
+          }
+          branchIds.add(bId);
+          bBatch.set(doc(db, 'branches', bId), {
             ownerId,
-            sku: cleanSku,
-            barcode: cleanBarcode,
-            name: cleanName,
-            price: cleanPrice,
-            image: '',
-            category: cleanCategory,
+            code: bCode,
+            name: bName,
+            address: '',
+            active: true,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
-          productBySku.set(skuKey, {
-            id: newId,
-            sku: cleanSku,
-            barcode: cleanBarcode,
-            name: cleanName,
-            price: cleanPrice,
-            image: '',
-            category: cleanCategory,
+          branchByName.set(bName.toLowerCase(), {
+            id: bId,
+            ownerId,
+            code: bCode,
+            name: bName,
+            address: '',
+            active: true,
           });
+          branchesCreated += 1;
+        });
+        await bBatch.commit();
+        report(
+          'Membuat cabang baru...',
+          Math.min(i + chunk.length, missingBranches.length),
+          missingBranches.length
+        );
+      }
+    }
+
+    // PASS 1B: Deduplicate products by sanitized SKU & candidate docId, then upsert in chunks of 150
+    const uniqueProductsByCleanSku = new Map<
+      string,
+      {
+        cleanSku: string;
+        cleanBarcode: string;
+        cleanName: string;
+        cleanCategory: string;
+        cleanPrice: number;
+      }
+    >();
+
+    rows.forEach((r, idx) => {
+      const cleanSku = sanitizeCode(r.sku, SKU_MAX, `SKU-${idx + 1}`);
+      const skuKey = cleanSku.toLowerCase();
+      const cleanBarcode = sanitizeCode(
+        r.barcode || cleanSku,
+        BARCODE_MAX,
+        cleanSku
+      );
+      const cleanName = r.name.trim().slice(0, NAME_MAX) || cleanSku;
+      const cleanCategory = sanitizeCategory(r.category);
+      const cleanPrice = Math.min(
+        1000000000,
+        Math.max(0, Math.round(r.price))
+      );
+
+      const prev = uniqueProductsByCleanSku.get(skuKey);
+      if (!prev) {
+        uniqueProductsByCleanSku.set(skuKey, {
+          cleanSku,
+          cleanBarcode,
+          cleanName,
+          cleanCategory,
+          cleanPrice,
+        });
+      } else {
+        uniqueProductsByCleanSku.set(skuKey, {
+          cleanSku: prev.cleanSku,
+          cleanBarcode: prev.cleanBarcode || cleanBarcode,
+          cleanName: prev.cleanName || cleanName,
+          cleanCategory:
+            prev.cleanCategory !== 'Umum' ? prev.cleanCategory : cleanCategory,
+          cleanPrice: prev.cleanPrice > 0 ? prev.cleanPrice : cleanPrice,
+        });
+      }
+    });
+
+    const prodEntries = Array.from(uniqueProductsByCleanSku.entries());
+    report('Menyimpan katalog produk...', 0, prodEntries.length);
+
+    for (let i = 0; i < prodEntries.length; i += 150) {
+      const chunk = prodEntries.slice(i, i + 150);
+      const pBatch = writeBatch(db);
+
+      for (const [skuKey, entry] of chunk) {
+        const candidateId = sanitizeId(
+          `${ownerId.slice(0, 8)}-${entry.cleanSku.toLowerCase()}`,
+          'prod'
+        );
+        const existing =
+          productBySku.get(skuKey) ?? productById.get(candidateId);
+
+        if (existing) {
+          const finalPrice =
+            entry.cleanPrice > 0 ? entry.cleanPrice : existing.price;
+          pBatch.update(doc(db, 'products', existing.id), {
+            sku: entry.cleanSku,
+            barcode: entry.cleanBarcode,
+            name: entry.cleanName,
+            price: finalPrice,
+            image: existing.image || '',
+            category: entry.cleanCategory,
+            updatedAt: serverTimestamp(),
+          });
+          const updatedProd: Product = {
+            ...existing,
+            sku: entry.cleanSku,
+            barcode: entry.cleanBarcode,
+            name: entry.cleanName,
+            price: finalPrice,
+            category: entry.cleanCategory,
+          };
+          productBySku.set(skuKey, updatedProd);
+          productById.set(existing.id, updatedProd);
+        } else {
+          pBatch.set(doc(db, 'products', candidateId), {
+            ownerId,
+            sku: entry.cleanSku,
+            barcode: entry.cleanBarcode,
+            name: entry.cleanName,
+            price: entry.cleanPrice,
+            image: '',
+            category: entry.cleanCategory,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          const createdProd: Product = {
+            id: candidateId,
+            sku: entry.cleanSku,
+            barcode: entry.cleanBarcode,
+            name: entry.cleanName,
+            price: entry.cleanPrice,
+            image: '',
+            category: entry.cleanCategory,
+          };
+          productBySku.set(skuKey, createdProd);
+          productById.set(candidateId, createdProd);
         }
         productsUpserted += 1;
       }
 
       await pBatch.commit();
+      report(
+        'Menyimpan katalog produk...',
+        Math.min(i + chunk.length, prodEntries.length),
+        prodEntries.length
+      );
     }
 
-    // PASS 2: Upsert branchStocks + stockLogs (branches & products now exist in Firestore!)
-    for (let i = 0; i < rows.length; i += 120) {
-      const chunk = rows.slice(i, i + 120);
+    // PASS 2: Deduplicate branchStocks by stockDocId and split into Updates vs Creates.
+    // CRITICAL: branchStocks `allow create` calls existsAfter+getAfter on branch & product (up to 4 rule reads/doc),
+    // and Firestore enforces a hard max of 20 rule document-access calls per writeBatch!
+    // Therefore, `stockCreates` MUST be batched in chunks of <= 4 (4 * 4 = 16 <= 20),
+    // while `stockUpdates` make 0 rule reads and can run in chunks of 100.
+    type StockTask = {
+      stockDocId: string;
+      branch: Branch;
+      product: Product;
+      initialStock: number;
+      currentStock: number;
+      existingStock?: BranchStock;
+    };
+
+    const stockTaskMap = new Map<string, StockTask>();
+    rows.forEach((row, idx) => {
+      const bName = (row.branchName.trim() || DEFAULT_BRANCH.name).slice(
+        0,
+        BRANCH_NAME_MAX
+      );
+      const cleanSku = sanitizeCode(row.sku, SKU_MAX, `SKU-${idx + 1}`);
+      const branch = branchByName.get(bName.toLowerCase());
+      const product = productBySku.get(cleanSku.toLowerCase());
+      if (!branch || !product) return;
+
+      const stockDocId = makeBranchStockDocId(branch.id, product.id);
+      const initialStock = Math.min(
+        1000000,
+        Math.max(0, Math.round(row.initialStock))
+      );
+      const currentStock = Math.min(
+        1000000,
+        Math.max(0, Math.round(row.currentStock))
+      );
+
+      const prevTask = stockTaskMap.get(stockDocId);
+      if (prevTask) {
+        // Keep higher/non-zero stock snapshot if same branch+product appeared in multiple period rows
+        stockTaskMap.set(stockDocId, {
+          ...prevTask,
+          initialStock:
+            initialStock > 0 ? initialStock : prevTask.initialStock,
+          currentStock:
+            currentStock > 0 ? currentStock : prevTask.currentStock,
+        });
+      } else {
+        stockTaskMap.set(stockDocId, {
+          stockDocId,
+          branch,
+          product,
+          initialStock,
+          currentStock,
+          existingStock: stockById.get(stockDocId),
+        });
+      }
+    });
+
+    const allStockTasks = Array.from(stockTaskMap.values());
+    const stockUpdates = allStockTasks.filter((t) => Boolean(t.existingStock));
+    const stockCreates = allStockTasks.filter((t) => !t.existingStock);
+    let stocksDone = 0;
+
+    report('Menyimpan stok cabang...', 0, allStockTasks.length);
+
+    // 2A: Updates (0 rule getAfter calls -> 100 per batch)
+    for (let i = 0; i < stockUpdates.length; i += 100) {
+      const chunk = stockUpdates.slice(i, i + 100);
       const sBatch = writeBatch(db);
-
-      chunk.forEach((row, idx) => {
-        const bName = (row.branchName.trim() || DEFAULT_BRANCH.name).slice(
-          0,
-          BRANCH_NAME_MAX
-        );
-        const branch = branchByName.get(bName.toLowerCase());
-        const product = productBySku.get(row.sku.trim().toLowerCase());
-        if (!branch || !product) return;
-
-        const stockDocId = makeBranchStockDocId(branch.id, product.id);
-        const existingStock = stockByKey.get(`${branch.id}::${product.id}`);
-        const initialStock = Math.min(
-          1000000,
-          Math.max(0, Math.round(row.initialStock))
-        );
-        const currentStock = Math.min(
-          1000000,
-          Math.max(0, Math.round(row.currentStock))
-        );
-
-        if (existingStock) {
-          sBatch.update(doc(db, 'branchStocks', stockDocId), {
-            initialStock,
-            currentStock,
-            minThreshold: existingStock.minThreshold ?? 2,
-            updatedAt: serverTimestamp(),
-          });
-        } else {
-          sBatch.set(doc(db, 'branchStocks', stockDocId), {
-            ownerId,
-            branchId: branch.id,
-            productId: product.id,
-            initialStock,
-            currentStock,
-            minThreshold: 2,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        }
+      chunk.forEach((task, idx) => {
+        sBatch.update(doc(db, 'branchStocks', task.stockDocId), {
+          initialStock: task.initialStock,
+          currentStock: task.currentStock,
+          minThreshold: task.existingStock?.minThreshold ?? 2,
+          updatedAt: serverTimestamp(),
+        });
 
         const logId = sanitizeId(
-          `imp-${Date.now()}-${i + idx}-${Math.random().toString(36).slice(2, 5)}`,
+          `imp-u-${Date.now()}-${i + idx}-${Math.random().toString(36).slice(2, 5)}`,
           'log'
         );
-        const prev = existingStock?.currentStock ?? 0;
+        const prev = task.existingStock?.currentStock ?? 0;
         sBatch.set(doc(db, 'stockLogs', logId), {
           ownerId,
-          branchId: branch.id,
-          branchName: branch.name,
-          productId: product.id,
-          productSku: product.sku,
-          productName: product.name,
+          branchId: task.branch.id,
+          branchName: task.branch.name,
+          productId: task.product.id,
+          productSku: task.product.sku,
+          productName: task.product.name,
           type: 'import',
-          qtyDelta: currentStock - prev,
+          qtyDelta: task.currentStock - prev,
           stockBefore: prev,
-          stockAfter: currentStock,
-          note: `Impor data stok (Awal: ${initialStock}, Sisa: ${currentStock})`,
+          stockAfter: task.currentStock,
+          note: `Impor pembaruan stok (Awal: ${task.initialStock}, Sisa: ${task.currentStock})`,
           actorName: actor,
           createdAt: serverTimestamp(),
         });
-
         stocksUpdated += 1;
       });
-
       await sBatch.commit();
+      stocksDone += chunk.length;
+      report('Menyimpan stok cabang...', stocksDone, allStockTasks.length);
+    }
+
+    // 2B: Creates (4 rule accesses per create -> strictly 4 per batch, run 3 batches in parallel for speed)
+    const createChunks: StockTask[][] = [];
+    for (let i = 0; i < stockCreates.length; i += 4) {
+      createChunks.push(stockCreates.slice(i, i + 4));
+    }
+
+    for (let c = 0; c < createChunks.length; c += 3) {
+      const parallelGroup = createChunks.slice(c, c + 3);
+      await Promise.all(
+        parallelGroup.map(async (chunk, groupOffset) => {
+          const sBatch = writeBatch(db);
+          chunk.forEach((task, idx) => {
+            sBatch.set(doc(db, 'branchStocks', task.stockDocId), {
+              ownerId,
+              branchId: task.branch.id,
+              productId: task.product.id,
+              initialStock: task.initialStock,
+              currentStock: task.currentStock,
+              minThreshold: 2,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+
+            const logId = sanitizeId(
+              `imp-c-${Date.now()}-${c + groupOffset}-${idx}-${Math.random().toString(36).slice(2, 5)}`,
+              'log'
+            );
+            sBatch.set(doc(db, 'stockLogs', logId), {
+              ownerId,
+              branchId: task.branch.id,
+              branchName: task.branch.name,
+              productId: task.product.id,
+              productSku: task.product.sku,
+              productName: task.product.name,
+              type: 'import',
+              qtyDelta: task.currentStock,
+              stockBefore: 0,
+              stockAfter: task.currentStock,
+              note: `Impor stok awal (Awal: ${task.initialStock}, Sisa: ${task.currentStock})`,
+              actorName: actor,
+              createdAt: serverTimestamp(),
+            });
+            stocksUpdated += 1;
+          });
+          await sBatch.commit();
+        })
+      );
+      stocksDone += parallelGroup.reduce((s, ch) => s + ch.length, 0);
+      report('Menyimpan stok cabang...', stocksDone, allStockTasks.length);
     }
 
     // PASS 3: Optional imported historical sales grouped by (branch, year, month)
     if (options.includeSales) {
       const salesRows = rows.filter((r) => (r.qtySold ?? 0) > 0);
-      const groups = new Map<string, ImportedCatalogRow[]>();
+      if (salesRows.length > 0) {
+        report('Menyimpan rekapan penjualan...', 0, salesRows.length);
+      }
 
+      const groups = new Map<string, ImportedCatalogRow[]>();
       for (const sr of salesRows) {
         const bName = (sr.branchName.trim() || DEFAULT_BRANCH.name).slice(
           0,
@@ -1685,35 +1887,88 @@ export async function importCatalogRowsToFirestore(
           Math.max(1, first.saleMonth ?? new Date().getMonth() + 1)
         );
 
-        // Process in chunks of 100 items per synthetic import transaction
-        for (let c = 0; c < groupRows.length; c += 100) {
-          const chunk = groupRows.slice(c, c + 100);
+        // Build chunks respecting both itemCount <= 50 and totalQty <= 9000 (rule limit is 10000)
+        const chunks: ImportedCatalogRow[][] = [];
+        let currentChunk: ImportedCatalogRow[] = [];
+        let currentChunkQty = 0;
+
+        for (const row of groupRows) {
+          const qty = Math.min(
+            10000,
+            Math.max(1, Math.round(row.qtySold ?? 1))
+          );
+          if (
+            currentChunk.length >= 50 ||
+            (currentChunk.length > 0 && currentChunkQty + qty > 9000)
+          ) {
+            chunks.push(currentChunk);
+            currentChunk = [];
+            currentChunkQty = 0;
+          }
+          currentChunk.push(row);
+          currentChunkQty += qty;
+        }
+        if (currentChunk.length > 0) chunks.push(currentChunk);
+
+        for (let c = 0; c < chunks.length; c++) {
+          const chunk = chunks[c];
           const txId = sanitizeId(
-            `tx-imp-${Date.now()}-${groupIdx}-${c}`,
+            `tx-imp-${Date.now()}-${groupIdx}-${c}-${Math.random().toString(36).slice(2, 5)}`,
             'tx'
           );
           const invoiceNo = sanitizeCode(
-            `IMP-${saleYear}${String(saleMonth).padStart(2, '0')}-${String(groupIdx).padStart(2, '0')}`,
+            `IMP-${saleYear}${String(saleMonth).padStart(2, '0')}-${String(groupIdx).padStart(2, '0')}-${c + 1}`,
             32,
             'IMP-01'
           );
 
-          const totalQty = chunk.reduce(
-            (s, r) => s + Math.max(1, Math.round(r.qtySold ?? 1)),
-            0
-          );
-          const grandTotal = chunk.reduce(
-            (s, r) =>
-              s +
+          const validEntries: Array<{
+            row: ImportedCatalogRow;
+            product: Product;
+            qty: number;
+            lineTotal: number;
+            unitPrice: number;
+          }> = [];
+
+          chunk.forEach((row, idx) => {
+            const cleanSku = sanitizeCode(row.sku, SKU_MAX, `SKU-${idx + 1}`);
+            const product = productBySku.get(cleanSku.toLowerCase());
+            if (!product) return;
+            const qty = Math.min(
+              10000,
+              Math.max(1, Math.round(row.qtySold ?? 1))
+            );
+            const lineTotal = Math.min(
+              1000000000,
               Math.max(
                 0,
                 Math.round(
-                  r.totalSales !== undefined
-                    ? r.totalSales
-                    : r.price * Math.max(1, Math.round(r.qtySold ?? 1))
+                  row.totalSales !== undefined
+                    ? row.totalSales
+                    : product.price * qty
                 )
-              ),
-            0
+              )
+            );
+            const unitPrice = Math.min(
+              1000000000,
+              row.price > 0
+                ? Math.round(row.price)
+                : qty > 0
+                  ? Math.round(lineTotal / qty)
+                  : 0
+            );
+            validEntries.push({ row, product, qty, lineTotal, unitPrice });
+          });
+
+          if (validEntries.length === 0) continue;
+
+          const totalQty = Math.min(
+            10000,
+            validEntries.reduce((s, e) => s + e.qty, 0)
+          );
+          const grandTotal = Math.min(
+            1000000000,
+            validEntries.reduce((s, e) => s + e.lineTotal, 0)
           );
 
           const txBatch = writeBatch(db);
@@ -1726,7 +1981,7 @@ export async function importCatalogRowsToFirestore(
             saleYear,
             saleMonth,
             source: 'import',
-            itemCount: chunk.length,
+            itemCount: validEntries.length,
             totalQty: Math.max(1, totalQty),
             subtotal: grandTotal,
             discountMode: 'none',
@@ -1739,32 +1994,19 @@ export async function importCatalogRowsToFirestore(
             createdAt: serverTimestamp(),
           });
 
-          chunk.forEach((row, idx) => {
-            const product = productBySku.get(row.sku.trim().toLowerCase());
-            if (!product) return;
-            const qty = Math.max(1, Math.round(row.qtySold ?? 1));
-            const lineTotal = Math.max(
-              0,
-              Math.round(
-                row.totalSales !== undefined ? row.totalSales : product.price * qty
-              )
+          validEntries.forEach((entry, idx) => {
+            const itemId = sanitizeId(
+              `item-${idx + 1}-${entry.product.id}`,
+              'item'
             );
-            const unitPrice =
-              row.price > 0
-                ? Math.round(row.price)
-                : qty > 0
-                  ? Math.round(lineTotal / qty)
-                  : 0;
-
-            const itemId = sanitizeId(`item-${idx + 1}-${product.id}`, 'item');
             txBatch.set(doc(db, 'transactions', txId, 'items', itemId), {
               ownerId,
               transactionId: txId,
-              productId: product.id,
-              name: product.name,
-              unitPrice,
-              qty,
-              lineTotal,
+              productId: entry.product.id,
+              name: entry.product.name,
+              unitPrice: entry.unitPrice,
+              qty: entry.qty,
+              lineTotal: entry.lineTotal,
               createdAt: serverTimestamp(),
             });
 
@@ -1774,13 +2016,13 @@ export async function importCatalogRowsToFirestore(
               transactionId: txId,
               branchId: branch.id,
               branchName: branch.name,
-              productId: product.id,
-              productSku: product.sku,
-              productName: product.name,
-              category: product.category,
-              qty,
-              unitPrice,
-              lineTotal,
+              productId: entry.product.id,
+              productSku: entry.product.sku,
+              productName: entry.product.name,
+              category: entry.product.category,
+              qty: entry.qty,
+              unitPrice: entry.unitPrice,
+              lineTotal: entry.lineTotal,
               saleYear,
               saleMonth,
               source: 'import',
@@ -1791,6 +2033,11 @@ export async function importCatalogRowsToFirestore(
           });
 
           await txBatch.commit();
+          report(
+            'Menyimpan rekapan penjualan...',
+            salesLinesImported,
+            salesRows.length
+          );
         }
       }
     }

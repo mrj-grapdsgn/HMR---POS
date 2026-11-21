@@ -725,13 +725,14 @@ export default function App() {
               activeCashierName
             )
           }
-          onImportRows={(rows, includeSales) =>
+          onImportRows={(rows, includeSales, onProgress) =>
             importCatalogRowsToFirestore(user.uid, rows, {
               existingBranches: branches,
               existingProducts: products,
               existingStocks: branchStocks,
               includeSales,
               actorName: activeCashierName,
+              onProgress,
             })
           }
           onSaveProduct={async (input) => {

@@ -163,3 +163,10 @@ export interface ImportedCatalogRow {
   saleMonth?: number;
   saleYear?: number;
 }
+
+export interface ImportProgress {
+  stage: string;
+  current: number;
+  total: number;
+}
+

@@ -23,6 +23,7 @@ import { SUGGESTED_CATEGORIES } from '../data/catalog';
 import {
   Branch,
   BranchStock,
+  ImportProgress,
   ImportedCatalogRow,
   PaymentMethod,
   Product,
@@ -92,7 +93,8 @@ interface AdminDashboardProps {
   }>;
   onImportRows: (
     rows: ImportedCatalogRow[],
-    includeSales: boolean
+    includeSales: boolean,
+    onProgress?: (progress: ImportProgress) => void
   ) => Promise<{
     branchesCreated: number;
     productsUpserted: number;
