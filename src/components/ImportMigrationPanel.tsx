@@ -19,9 +19,18 @@ import {
   ParsedWorkbookResult,
   extractGoogleSheetInfo,
   fetchAndParseSheetUrl,
+  fetchAndSyncGoogleSheetTabs,
   mergeSelectedTabs,
   parseSpreadsheetFile,
 } from '../utils/spreadsheetImport';
+
+const SAVED_SHEET_URL_KEY = 'kasirpos_last_google_sheet_url';
+
+type SheetSyncMode =
+  | 'dual_stok_penjualan'
+  | 'data_penjualan'
+  | 'monitoring_stok'
+  | 'custom';
 
 interface ImportMigrationPanelProps {
   branches: Branch[];
@@ -39,6 +48,7 @@ interface ImportMigrationPanelProps {
     productsUpserted: number;
     stocksUpdated: number;
     salesLinesImported: number;
+    salesLinesSkipped?: number;
   }>;
   onNotify: (msg: string) => void;
 }
@@ -50,6 +60,10 @@ const TAB_KIND_LABEL: Record<ParsedSheetTab['kind'], string> = {
   unknown: 'Lainnya',
 };
 
+const MONTH_SHORT_MAP: Record<number, string> = Object.fromEntries(
+  MONTH_OPTIONS.map((m) => [m.num, m.short])
+);
+
 export function ImportMigrationPanel({
   branches,
   hasLegacyCafe,
@@ -59,8 +73,17 @@ export function ImportMigrationPanel({
 }: ImportMigrationPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [sheetUrl, setSheetUrl] = useState('');
-  const [sheetTabName, setSheetTabName] = useState('monitoring_stok');
+  const [sheetUrl, setSheetUrl] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(SAVED_SHEET_URL_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const [syncMode, setSyncMode] = useState<SheetSyncMode>(
+    'dual_stok_penjualan'
+  );
+  const [customTabName, setCustomTabName] = useState('');
   const [defaultBranch, setDefaultBranch] = useState(
     branches[0]?.name ?? 'CFD Senayan'
   );
@@ -96,8 +119,22 @@ export function ImportMigrationPanel({
     return mergeSelectedTabs(parsedTabs, selectedTabNames);
   }, [manualRows, parsedTabs, selectedTabNames]);
 
-  const uniqueSkuCount = useMemo(() => {
-    return new Set(previewRows.map((r) => r.sku.toLowerCase())).size;
+  const previewStats = useMemo(() => {
+    const skus = new Set(previewRows.map((r) => r.sku.toLowerCase()));
+    const totalQtySold = previewRows.reduce((s, r) => s + (r.qtySold ?? 0), 0);
+    const totalOmset = previewRows.reduce(
+      (s, r) =>
+        s +
+        (r.totalSales !== undefined
+          ? r.totalSales
+          : (r.qtySold ?? 0) * r.price),
+      0
+    );
+    return {
+      uniqueSkus: skus.size,
+      totalQtySold,
+      totalOmset,
+    };
   }, [previewRows]);
 
   const directXlsxFromInput = useMemo(() => {
@@ -106,6 +143,15 @@ export function ImportMigrationPanel({
       ? `https://docs.google.com/spreadsheets/d/${info.sheetId}/export?format=xlsx`
       : null;
   }, [sheetUrl]);
+
+  const handleSheetUrlChange = (val: string) => {
+    setSheetUrl(val);
+    try {
+      window.localStorage.setItem(SAVED_SHEET_URL_KEY, val);
+    } catch {
+      // Ignore storage quota errors
+    }
+  };
 
   const applyWorkbookResult = (
     parsed: ParsedWorkbookResult,
@@ -165,25 +211,58 @@ export function ImportMigrationPanel({
     setResultMsg(null);
     setParsing(true);
     try {
-      const parsed = await fetchAndParseSheetUrl(
-        sheetUrl,
-        defaultBranch,
-        defaultMonth,
-        defaultYear,
-        sheetTabName
-      );
-      if (parsed.tabs.length === 0 || parsed.rows.length === 0) {
-        setErrorMsg(
-          'Link berhasil dibuka tetapi tidak ditemukan kolom produk yang dikenali. Coba isi "Nama Tab / Sheet" sesuai tab daftar produk Anda, atau unduh file sebagai .xlsx.'
+      let parsed: ParsedWorkbookResult;
+      let label: string;
+
+      if (syncMode === 'dual_stok_penjualan') {
+        parsed = await fetchAndSyncGoogleSheetTabs(
+          sheetUrl,
+          ['monitoring_stok', 'Data_Penjualan'],
+          defaultBranch,
+          defaultMonth,
+          defaultYear
         );
+        label = `Sinkron Gabungan (${parsed.tabs.map((t) => t.sheetName).join(' + ')})`;
+      } else if (syncMode === 'data_penjualan') {
+        parsed = await fetchAndParseSheetUrl(
+          sheetUrl,
+          defaultBranch,
+          defaultMonth,
+          defaultYear,
+          'Data_Penjualan'
+        );
+        label = 'Google Sheet · Tab "Data_Penjualan"';
+      } else if (syncMode === 'monitoring_stok') {
+        parsed = await fetchAndParseSheetUrl(
+          sheetUrl,
+          defaultBranch,
+          defaultMonth,
+          defaultYear,
+          'monitoring_stok'
+        );
+        label = 'Google Sheet · Tab "monitoring_stok"';
       } else {
-        const formatLabel =
+        parsed = await fetchAndParseSheetUrl(
+          sheetUrl,
+          defaultBranch,
+          defaultMonth,
+          defaultYear,
+          customTabName
+        );
+        label =
           parsed.fetchedFormat === 'xlsx'
             ? `Google Sheet (${parsed.tabs.length} tab)`
-            : sheetTabName.trim()
-              ? `Google Sheet · Tab "${sheetTabName.trim()}"`
+            : customTabName.trim()
+              ? `Google Sheet · Tab "${customTabName.trim()}"`
               : 'Google Sheet (1 tab CSV)';
-        applyWorkbookResult(parsed, formatLabel);
+      }
+
+      if (parsed.tabs.length === 0 || parsed.rows.length === 0) {
+        setErrorMsg(
+          'Link berhasil dibuka tetapi tidak ditemukan kolom produk/penjualan yang dikenali. Pastikan ejaan nama tab (monitoring_stok / Data_Penjualan) sesuai di Google Sheet Anda, atau unduh sebagai .xlsx.'
+        );
+      } else {
+        applyWorkbookResult(parsed, label);
       }
     } catch (err) {
       setErrorMsg(
@@ -236,7 +315,7 @@ export function ImportMigrationPanel({
     setResultMsg(null);
     setSaving(true);
     setProgress({
-      stage: 'Memulai impor ke Firebase...',
+      stage: 'Memulai sinkronisasi ke Firebase...',
       current: 0,
       total: previewRows.length,
     });
@@ -252,17 +331,23 @@ export function ImportMigrationPanel({
         includeSales,
         (prog) => setProgress(prog)
       );
-      const msg = `Berhasil disimpan ke Firebase: ${summary.productsUpserted} produk, ${summary.stocksUpdated} stok cabang${
+      const skippedText =
+        summary.salesLinesSkipped && summary.salesLinesSkipped > 0
+          ? ` (${summary.salesLinesSkipped} baris penjualan sudah sinkron & dilewati agar tidak ganda)`
+          : '';
+      const msg = `Berhasil disinkronkan ke Firebase: ${summary.productsUpserted} produk, ${summary.stocksUpdated} stok cabang${
         summary.branchesCreated > 0
           ? `, ${summary.branchesCreated} cabang baru`
           : ''
       }${
         summary.salesLinesImported > 0
-          ? `, ${summary.salesLinesImported} baris penjualan`
+          ? `, ${summary.salesLinesImported} baris penjualan baru`
           : ''
-      }.`;
+      }${skippedText}.`;
       setResultMsg(msg);
-      onNotify(`Impor selesai (${summary.productsUpserted} produk tersimpan)`);
+      onNotify(
+        `Sinkronisasi selesai (${summary.productsUpserted} produk, ${summary.salesLinesImported} penjualan baru)`
+      );
       clearPreview();
     } catch (err) {
       setErrorMsg(
@@ -330,20 +415,20 @@ export function ImportMigrationPanel({
       {/* Importer Controls Grid */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         {/* Upload Excel / CSV (Multi-Tab Recommended!) */}
-        <div className="space-y-3.5 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-7">
+        <div className="space-y-3.5 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6">
           <div className="flex items-start justify-between gap-2">
             <div>
               <h2 className="text-sm font-bold text-slate-900">
                 Impor Semua Tab dari Excel (.xlsx) / CSV
               </h2>
               <p className="mt-0.5 text-xs text-slate-500">
-                <strong>Cara terbaik untuk banyak produk & banyak tab:</strong>{' '}
-                di Google Sheets klik{' '}
+                Di Google Sheets klik{' '}
                 <span className="font-semibold text-slate-700">
                   File → Download → Microsoft Excel (.xlsx)
                 </span>
-                , lalu unggah file tersebut di sini. Semua tab (Master Produk,
-                Stok Cabang, Penjualan) akan dibaca sekaligus.
+                , lalu unggah di sini. Tab <strong>monitoring_stok</strong> &{' '}
+                <strong>Data_Penjualan</strong> otomatis dibaca dan digabungkan
+                sekaligus.
               </p>
             </div>
           </div>
@@ -364,7 +449,7 @@ export function ImportMigrationPanel({
             </div>
             <div>
               <label className="mb-1 block text-[11px] font-semibold text-slate-600">
-                Bulan Data Penjualan
+                Bulan Default
               </label>
               <select
                 value={defaultMonth}
@@ -380,7 +465,7 @@ export function ImportMigrationPanel({
             </div>
             <div>
               <label className="mb-1 block text-[11px] font-semibold text-slate-600">
-                Tahun
+                Tahun Default
               </label>
               <input
                 type="number"
@@ -425,80 +510,118 @@ export function ImportMigrationPanel({
               className="flex h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
             >
               <FileSpreadsheet className="h-4 w-4 text-emerald-600" />
-              <span>Muat 13 Produk Awal (CFD Senayan)</span>
+              <span>Muat 13 Produk Awal</span>
             </button>
           </div>
 
           <p className="text-[11px] text-slate-500">
-            Kolom yang dikenali otomatis: <strong>Kode Item / SKU</strong>,{' '}
-            <strong>Nama Produk</strong>, <strong>Kategori</strong>,{' '}
-            <strong>Harga</strong>, <strong>Stok Awal</strong>,{' '}
-            <strong>Sisa Stok</strong>, <strong>Cabang</strong>,{' '}
-            <strong>Tanggal / Bulan</strong>, <strong>Qty Terjual</strong>, dan{' '}
-            <strong>Total Penjualan</strong>.
+            Sinkronisasi ulang <strong>Data_Penjualan</strong> aman dari
+            duplikasi (hanya selisih penjualan baru yang ditambahkan) dan tidak
+            menimpa stok cabang yang sudah ada.
           </p>
         </div>
 
-        {/* One-Time Google Sheet Link Import */}
+        {/* Google Sheet Direct Sync (monitoring_stok + Data_Penjualan) */}
         <form
           onSubmit={handleFetchSheetUrl}
-          className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-5"
+          className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6"
         >
           <h3 className="flex items-center gap-1.5 text-sm font-bold text-slate-900">
             <Link2 className="h-4 w-4 text-[#1B8EE6]" />
-            <span>Tarik Sekali dari Link Google Sheet</span>
+            <span>Sinkronisasi dari Link Google Sheet</span>
           </h3>
           <p className="text-xs text-slate-500">
-            Tempel link Google Sheet Anda. Jika tab pertama adalah Dasbor
-            (hanya 13 produk), isi <strong>Nama Tab</strong> daftar produk
-            lengkap Anda di bawah atau unduh semua tab sebagai{' '}
-            <strong>.xlsx</strong>.
+            Tempel link Google Sheet Anda untuk menarik langsung tab{' '}
+            <strong>monitoring_stok</strong> (daftar produk & stok) dan{' '}
+            <strong>Data_Penjualan</strong> (riwayat penjualan per produk &
+            bulan) sekaligus ke Firebase.
           </p>
-          <div className="space-y-2">
-            <input
-              type="url"
-              value={sheetUrl}
-              onChange={(e) => setSheetUrl(e.target.value)}
-              placeholder="https://docs.google.com/spreadsheets/d/..."
-              className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
-            />
-            <div>
-              <div className="mb-1 flex items-center justify-between">
-                <label className="block text-[11px] font-semibold text-slate-600">
-                  Nama Tab / Sheet Spesifik (Opsional)
-                </label>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setSheetTabName('monitoring_stok')}
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition-colors ${
-                      sheetTabName === 'monitoring_stok'
-                        ? 'bg-[#1B8EE6] text-white'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                  >
-                    monitoring_stok
-                  </button>
-                  {sheetTabName && (
-                    <button
-                      type="button"
-                      onClick={() => setSheetTabName('')}
-                      className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 hover:bg-slate-200"
-                    >
-                      Semua Tab
-                    </button>
-                  )}
+
+          <input
+            type="url"
+            value={sheetUrl}
+            onChange={(e) => handleSheetUrlChange(e.target.value)}
+            placeholder="https://docs.google.com/spreadsheets/d/..."
+            className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+          />
+
+          {/* Mode Selector */}
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-semibold text-slate-600">
+              Sumber Tab yang Disinkronkan
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => setSyncMode('dual_stok_penjualan')}
+                className={`rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition-colors ${
+                  syncMode === 'dual_stok_penjualan'
+                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <div>monitoring_stok + Data_Penjualan</div>
+                <div className="text-[10px] font-normal text-slate-500">
+                  Gabung produk, stok & penjualan
                 </div>
-              </div>
-              <input
-                type="text"
-                value={sheetTabName}
-                onChange={(e) => setSheetTabName(e.target.value)}
-                placeholder="Contoh: monitoring_stok, Master Produk, atau Transaksi"
-                className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
-              />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSyncMode('data_penjualan')}
+                className={`rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition-colors ${
+                  syncMode === 'data_penjualan'
+                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <div>Hanya Data_Penjualan</div>
+                <div className="text-[10px] font-normal text-slate-500">
+                  Sinkron penjualan (stok tetap aman)
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSyncMode('monitoring_stok')}
+                className={`rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition-colors ${
+                  syncMode === 'monitoring_stok'
+                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <div>Hanya monitoring_stok</div>
+                <div className="text-[10px] font-normal text-slate-500">
+                  Daftar produk & sisa stok
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSyncMode('custom')}
+                className={`rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition-colors ${
+                  syncMode === 'custom'
+                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <div>Tab Lain / Semua Tab</div>
+                <div className="text-[10px] font-normal text-slate-500">
+                  Ketik nama tab manual
+                </div>
+              </button>
             </div>
           </div>
+
+          {syncMode === 'custom' && (
+            <input
+              type="text"
+              value={customTabName}
+              onChange={(e) => setCustomTabName(e.target.value)}
+              placeholder="Kosongkan untuk coba semua tab, atau ketik nama tab..."
+              className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+            />
+          )}
 
           <div className="flex flex-col gap-2 sm:flex-row">
             <button
@@ -509,9 +632,17 @@ export function ImportMigrationPanel({
               {parsing ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Link2 className="h-3.5 w-3.5" />
+                <RefreshCw className="h-3.5 w-3.5" />
               )}
-              <span>Ambil Pratinjau</span>
+              <span>
+                {syncMode === 'dual_stok_penjualan'
+                  ? 'Tarik monitoring_stok + Data_Penjualan'
+                  : syncMode === 'data_penjualan'
+                    ? 'Tarik Sheet Data_Penjualan'
+                    : syncMode === 'monitoring_stok'
+                      ? 'Tarik Sheet monitoring_stok'
+                      : 'Ambil Pratinjau'}
+              </span>
             </button>
 
             {directXlsxFromInput && (
@@ -522,7 +653,7 @@ export function ImportMigrationPanel({
                 className="flex h-9 items-center justify-center gap-1.5 rounded-lg border border-[#1B8EE6] bg-sky-50 px-3 text-xs font-bold text-[#1B8EE6] hover:bg-sky-100 whitespace-nowrap"
               >
                 <Download className="h-3.5 w-3.5" />
-                <span>Unduh Semua Tab (.xlsx)</span>
+                <span>Unduh .xlsx</span>
               </a>
             )}
           </div>
@@ -538,7 +669,7 @@ export function ImportMigrationPanel({
               <div className="font-bold">
                 {isDashboardOnly
                   ? 'Perhatian: Tab yang terbaca adalah Tab Dasbor Ringkasan (bukan seluruh produk)'
-                  : 'Catatan Multi-Tab Google Sheet'}
+                  : 'Catatan Sinkronisasi Tab Google Sheet'}
               </div>
               {warnings.map((w, idx) => (
                 <p key={idx} className="text-amber-800">
@@ -619,16 +750,18 @@ export function ImportMigrationPanel({
       {/* Multi-Tab Sheet Selector (when workbook has > 1 detected tab) */}
       {parsedTabs.length > 1 && (
         <div className="space-y-2.5 rounded-xl border border-slate-200 bg-white p-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
               <Layers className="h-4 w-4 text-[#1B8EE6]" />
               <span>
-                Pilih Tab Spreadsheet yang Ingin Diimpor ({parsedTabs.length}{' '}
-                tab terdeteksi)
+                Tab Spreadsheet Terdeteksi ({parsedTabs.length} tab)
               </span>
             </div>
             <span className="text-[11px] text-slate-500">
-              Tab Dasbor Ringkasan otomatis tidak dicentang agar tidak duplikat
+              Jika <strong>monitoring_stok</strong> &{' '}
+              <strong>Data_Penjualan</strong> dipilih bersama, stok diambil dari{' '}
+              <em>monitoring_stok</em> dan penjualan dari <em>Data_Penjualan</em>{' '}
+              tanpa hitung ganda
             </span>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -650,7 +783,7 @@ export function ImportMigrationPanel({
                     className="h-3.5 w-3.5 accent-[#1B8EE6]"
                   />
                   <span className="font-bold">{tab.sheetName}</span>
-                  <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 border border-slate-200">
+                  <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
                     {TAB_KIND_LABEL[tab.kind]} · {tab.rows.length} baris
                   </span>
                 </label>
@@ -666,8 +799,10 @@ export function ImportMigrationPanel({
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
             <div>
               <div className="text-xs font-bold text-slate-900">
-                Pratinjau Data Siap Diimpor ({previewRows.length} baris ·{' '}
-                {uniqueSkuCount} produk unik · {sourceLabel})
+                Pratinjau Data Siap Disinkronkan ({previewRows.length} baris ·{' '}
+                {previewStats.uniqueSkus} produk unik ·{' '}
+                {previewStats.totalQtySold} pcs terjual ·{' '}
+                {formatRupiah(previewStats.totalOmset)} · {sourceLabel})
               </div>
               <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-slate-600">
                 <input
@@ -677,8 +812,8 @@ export function ImportMigrationPanel({
                   className="h-3.5 w-3.5 accent-[#1B8EE6]"
                 />
                 <span>
-                  Sertakan kolom Qty Terjual & Total Penjualan ke Dasbor Rekapan
-                  & Restok
+                  Sinkronkan data penjualan (Qty Terjual & Omset) ke Dasbor
+                  Rekapan & Analisis Restok
                 </span>
               </label>
             </div>
@@ -700,8 +835,8 @@ export function ImportMigrationPanel({
                 {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                 <span>
                   {saving
-                    ? 'Menyimpan ke Firebase...'
-                    : `Simpan ${uniqueSkuCount} Produk ke Firebase`}
+                    ? 'Menyinkronkan...'
+                    : `Sinkronkan ${previewStats.uniqueSkus} Produk ke Firebase`}
                 </span>
               </button>
             </div>
@@ -716,15 +851,16 @@ export function ImportMigrationPanel({
                   <th className="px-3 py-2 font-semibold">Nama Produk</th>
                   <th className="px-3 py-2 font-semibold">Kategori</th>
                   <th className="px-3 py-2 font-semibold">Cabang</th>
+                  <th className="px-3 py-2 font-semibold">Periode</th>
                   <th className="px-3 py-2 text-right font-semibold">Harga</th>
-                  <th className="px-3 py-2 text-right font-semibold">
-                    Stok Awal
-                  </th>
                   <th className="px-3 py-2 text-right font-semibold">
                     Sisa Stok
                   </th>
                   <th className="px-3 py-2 text-right font-semibold">
                     Terjual
+                  </th>
+                  <th className="px-3 py-2 text-right font-semibold">
+                    Total Penjualan
                   </th>
                 </tr>
               </thead>
@@ -747,23 +883,36 @@ export function ImportMigrationPanel({
                     <td className="px-3 py-2 text-slate-600">
                       {row.branchName}
                     </td>
+                    <td className="font-mono-num px-3 py-2 text-slate-600 whitespace-nowrap">
+                      {row.saleMonth
+                        ? `${MONTH_SHORT_MAP[row.saleMonth] ?? row.saleMonth} ${row.saleYear ?? defaultYear}`
+                        : '—'}
+                    </td>
                     <td className="font-mono-num px-3 py-2 text-right text-slate-800">
                       {formatRupiah(row.price)}
                     </td>
-                    <td className="font-mono-num px-3 py-2 text-right text-slate-600">
-                      {row.initialStock}
-                    </td>
                     <td
                       className={`font-mono-num px-3 py-2 text-right font-bold ${
-                        row.currentStock <= 0
-                          ? 'text-rose-600'
-                          : 'text-slate-900'
+                        row.hasStockData === false
+                          ? 'text-slate-400 font-normal'
+                          : row.currentStock <= 0
+                            ? 'text-rose-600'
+                            : 'text-slate-900'
                       }`}
                     >
-                      {row.currentStock}
+                      {row.hasStockData === false ? 'Tetap' : row.currentStock}
                     </td>
-                    <td className="font-mono-num px-3 py-2 text-right text-slate-600">
+                    <td className="font-mono-num px-3 py-2 text-right text-slate-700">
                       {row.qtySold ? `${row.qtySold} pcs` : '—'}
+                    </td>
+                    <td className="font-mono-num px-3 py-2 text-right font-semibold text-emerald-700">
+                      {row.qtySold
+                        ? formatRupiah(
+                            row.totalSales !== undefined
+                              ? row.totalSales
+                              : row.qtySold * row.price
+                          )
+                        : '—'}
                     </td>
                   </tr>
                 ))}

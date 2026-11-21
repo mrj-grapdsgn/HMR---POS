@@ -158,6 +158,7 @@ export interface ImportedCatalogRow {
   branchName: string;
   initialStock: number;
   currentStock: number;
+  hasStockData?: boolean;
   qtySold?: number;
   totalSales?: number;
   saleMonth?: number;

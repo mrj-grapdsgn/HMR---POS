@@ -1428,6 +1428,7 @@ export async function importCatalogRowsToFirestore(
   productsUpserted: number;
   stocksUpdated: number;
   salesLinesImported: number;
+  salesLinesSkipped: number;
 }> {
   if (rows.length === 0) {
     return {
@@ -1435,6 +1436,7 @@ export async function importCatalogRowsToFirestore(
       productsUpserted: 0,
       stocksUpdated: 0,
       salesLinesImported: 0,
+      salesLinesSkipped: 0,
     };
   }
 
@@ -1447,19 +1449,43 @@ export async function importCatalogRowsToFirestore(
   let productsUpserted = 0;
   let stocksUpdated = 0;
   let salesLinesImported = 0;
+  let salesLinesSkipped = 0;
 
   try {
     report('Memeriksa data existing di Firebase...', 0, rows.length);
 
-    // Fetch live snapshots from Firestore so we never accidentally call set() with createdAt on an existing doc
-    const [liveBranchesSnap, liveProductsSnap, liveStocksSnap] =
+    // Fetch live snapshots from Firestore so we never overwrite existing createdAt or duplicate imported salesLines
+    const [liveBranchesSnap, liveProductsSnap, liveStocksSnap, liveSalesSnap] =
       await Promise.all([
         getDocs(query(collection(db, 'branches'), where('ownerId', '==', ownerId))),
         getDocs(query(collection(db, 'products'), where('ownerId', '==', ownerId))),
         getDocs(
           query(collection(db, 'branchStocks'), where('ownerId', '==', ownerId))
         ),
+        options.includeSales
+          ? getDocs(
+              query(collection(db, 'salesLines'), where('ownerId', '==', ownerId))
+            )
+          : Promise.resolve(null),
       ]);
+
+    // Track already-imported sales per (branchId, productId, year, month) so re-syncing Data_Penjualan never duplicates!
+    const existingImportedSales = new Map<
+      string,
+      { qty: number; lineTotal: number }
+    >();
+    if (liveSalesSnap) {
+      liveSalesSnap.docs.forEach((d) => {
+        const data = d.data();
+        if (data.source !== 'import') return;
+        const key = `${String(data.branchId ?? '')}::${String(data.productId ?? '')}::${Number(data.saleYear ?? 0)}::${Number(data.saleMonth ?? 0)}`;
+        const prev = existingImportedSales.get(key) ?? { qty: 0, lineTotal: 0 };
+        existingImportedSales.set(key, {
+          qty: prev.qty + Number(data.qty ?? 0),
+          lineTotal: prev.lineTotal + Number(data.lineTotal ?? 0),
+        });
+      });
+    }
 
     const branchByName = new Map<string, Branch>();
     const branchIds = new Set<string>();
@@ -1703,6 +1729,7 @@ export async function importCatalogRowsToFirestore(
       product: Product;
       initialStock: number;
       currentStock: number;
+      hasStockData: boolean;
       existingStock?: BranchStock;
     };
 
@@ -1718,6 +1745,15 @@ export async function importCatalogRowsToFirestore(
       if (!branch || !product) return;
 
       const stockDocId = makeBranchStockDocId(branch.id, product.id);
+      const hasStockData = row.hasStockData !== false;
+      const existingStock = stockById.get(stockDocId);
+
+      // CRITICAL: If syncing a sales-only sheet (like Data_Penjualan where hasStockData === false),
+      // do NOT overwrite existing branch stocks with 0!
+      if (!hasStockData && existingStock) {
+        return;
+      }
+
       const initialStock = Math.min(
         1000000,
         Math.max(0, Math.round(row.initialStock))
@@ -1729,13 +1765,15 @@ export async function importCatalogRowsToFirestore(
 
       const prevTask = stockTaskMap.get(stockDocId);
       if (prevTask) {
-        // Keep higher/non-zero stock snapshot if same branch+product appeared in multiple period rows
         stockTaskMap.set(stockDocId, {
           ...prevTask,
-          initialStock:
-            initialStock > 0 ? initialStock : prevTask.initialStock,
-          currentStock:
-            currentStock > 0 ? currentStock : prevTask.currentStock,
+          initialStock: hasStockData
+            ? initialStock
+            : prevTask.initialStock,
+          currentStock: hasStockData
+            ? currentStock
+            : prevTask.currentStock,
+          hasStockData: prevTask.hasStockData || hasStockData,
         });
       } else {
         stockTaskMap.set(stockDocId, {
@@ -1744,7 +1782,8 @@ export async function importCatalogRowsToFirestore(
           product,
           initialStock,
           currentStock,
-          existingStock: stockById.get(stockDocId),
+          hasStockData,
+          existingStock,
         });
       }
     });
@@ -1847,23 +1886,117 @@ export async function importCatalogRowsToFirestore(
     }
 
     // PASS 3: Optional imported historical sales grouped by (branch, year, month)
+    // Uses anti-duplicate delta sync against existing imported salesLines so re-syncing Data_Penjualan never doubles totals!
     if (options.includeSales) {
-      const salesRows = rows.filter((r) => (r.qtySold ?? 0) > 0);
-      if (salesRows.length > 0) {
-        report('Menyimpan rekapan penjualan...', 0, salesRows.length);
-      }
+      const rawSalesRows = rows.filter((r) => (r.qtySold ?? 0) > 0);
 
-      const groups = new Map<string, ImportedCatalogRow[]>();
-      for (const sr of salesRows) {
+      // Aggregate incoming rows per (branchId, productId, saleYear, saleMonth) first
+      type AggSalesEntry = {
+        branch: Branch;
+        product: Product;
+        saleYear: number;
+        saleMonth: number;
+        qty: number;
+        lineTotal: number;
+        unitPrice: number;
+      };
+
+      const incomingAgg = new Map<string, AggSalesEntry>();
+      rawSalesRows.forEach((sr, idx) => {
         const bName = (sr.branchName.trim() || DEFAULT_BRANCH.name).slice(
           0,
           BRANCH_NAME_MAX
         );
-        const yr = sr.saleYear ?? new Date().getFullYear();
-        const mo = sr.saleMonth ?? new Date().getMonth() + 1;
-        const gKey = `${bName.toLowerCase()}::${yr}::${mo}`;
+        const branch = branchByName.get(bName.toLowerCase());
+        const cleanSku = sanitizeCode(sr.sku, SKU_MAX, `SKU-${idx + 1}`);
+        const product = productBySku.get(cleanSku.toLowerCase());
+        if (!branch || !product) return;
+
+        const saleYear = Math.min(
+          2100,
+          Math.max(2000, sr.saleYear ?? new Date().getFullYear())
+        );
+        const saleMonth = Math.min(
+          12,
+          Math.max(1, sr.saleMonth ?? new Date().getMonth() + 1)
+        );
+        const qty = Math.max(1, Math.round(sr.qtySold ?? 1));
+        const lineTotal = Math.max(
+          0,
+          Math.round(
+            sr.totalSales !== undefined ? sr.totalSales : product.price * qty
+          )
+        );
+        const unitPrice =
+          sr.price > 0
+            ? Math.round(sr.price)
+            : qty > 0
+              ? Math.round(lineTotal / qty)
+              : product.price;
+
+        const aggKey = `${branch.id}::${product.id}::${saleYear}::${saleMonth}`;
+        const prev = incomingAgg.get(aggKey);
+        if (prev) {
+          incomingAgg.set(aggKey, {
+            ...prev,
+            qty: prev.qty + qty,
+            lineTotal: prev.lineTotal + lineTotal,
+            unitPrice: prev.unitPrice > 0 ? prev.unitPrice : unitPrice,
+          });
+        } else {
+          incomingAgg.set(aggKey, {
+            branch,
+            product,
+            saleYear,
+            saleMonth,
+            qty,
+            lineTotal,
+            unitPrice,
+          });
+        }
+      });
+
+      // Compute delta against already-imported salesLines
+      const deltaEntries: AggSalesEntry[] = [];
+      for (const [aggKey, entry] of incomingAgg.entries()) {
+        const already = existingImportedSales.get(aggKey);
+        if (already && already.qty >= entry.qty) {
+          salesLinesSkipped += 1;
+          continue;
+        }
+        const deltaQty = Math.min(
+          10000,
+          Math.max(1, entry.qty - (already?.qty ?? 0))
+        );
+        const deltaTotal = Math.min(
+          1000000000,
+          Math.max(0, entry.lineTotal - (already?.lineTotal ?? 0))
+        );
+        const unitPrice = Math.min(
+          1000000000,
+          entry.unitPrice > 0
+            ? entry.unitPrice
+            : deltaQty > 0
+              ? Math.round(deltaTotal / deltaQty)
+              : 0
+        );
+        deltaEntries.push({
+          ...entry,
+          qty: deltaQty,
+          lineTotal: deltaTotal,
+          unitPrice,
+        });
+      }
+
+      if (deltaEntries.length > 0) {
+        report('Menyinkronkan data penjualan...', 0, deltaEntries.length);
+      }
+
+      const groups = new Map<string, AggSalesEntry[]>();
+      for (const entry of deltaEntries) {
+        const gKey = `${entry.branch.id}::${entry.saleYear}::${entry.saleMonth}`;
         const list = groups.get(gKey) ?? [];
-        list.push(sr);
+        list.push(entry);
         groups.set(gKey, list);
       }
 
@@ -1871,47 +2004,33 @@ export async function importCatalogRowsToFirestore(
       for (const [, groupRows] of groups.entries()) {
         groupIdx += 1;
         const first = groupRows[0];
-        const bName = (first.branchName.trim() || DEFAULT_BRANCH.name).slice(
-          0,
-          BRANCH_NAME_MAX
-        );
-        const branch = branchByName.get(bName.toLowerCase());
-        if (!branch) continue;
-
-        const saleYear = Math.min(
-          2100,
-          Math.max(2000, first.saleYear ?? new Date().getFullYear())
-        );
-        const saleMonth = Math.min(
-          12,
-          Math.max(1, first.saleMonth ?? new Date().getMonth() + 1)
-        );
+        const branch = first.branch;
+        const saleYear = first.saleYear;
+        const saleMonth = first.saleMonth;
 
         // Build chunks respecting both itemCount <= 50 and totalQty <= 9000 (rule limit is 10000)
-        const chunks: ImportedCatalogRow[][] = [];
-        let currentChunk: ImportedCatalogRow[] = [];
+        const chunks: AggSalesEntry[][] = [];
+        let currentChunk: AggSalesEntry[] = [];
         let currentChunkQty = 0;
 
-        for (const row of groupRows) {
-          const qty = Math.min(
-            10000,
-            Math.max(1, Math.round(row.qtySold ?? 1))
-          );
+        for (const entry of groupRows) {
           if (
             currentChunk.length >= 50 ||
-            (currentChunk.length > 0 && currentChunkQty + qty > 9000)
+            (currentChunk.length > 0 && currentChunkQty + entry.qty > 9000)
           ) {
             chunks.push(currentChunk);
             currentChunk = [];
             currentChunkQty = 0;
           }
-          currentChunk.push(row);
-          currentChunkQty += qty;
+          currentChunk.push(entry);
+          currentChunkQty += entry.qty;
         }
         if (currentChunk.length > 0) chunks.push(currentChunk);
 
         for (let c = 0; c < chunks.length; c++) {
-          const chunk = chunks[c];
+          const validEntries = chunks[c];
+          if (validEntries.length === 0) continue;
+
           const txId = sanitizeId(
             `tx-imp-${Date.now()}-${groupIdx}-${c}-${Math.random().toString(36).slice(2, 5)}`,
             'tx'
@@ -1921,46 +2040,6 @@ export async function importCatalogRowsToFirestore(
             32,
             'IMP-01'
           );
-
-          const validEntries: Array<{
-            row: ImportedCatalogRow;
-            product: Product;
-            qty: number;
-            lineTotal: number;
-            unitPrice: number;
-          }> = [];
-
-          chunk.forEach((row, idx) => {
-            const cleanSku = sanitizeCode(row.sku, SKU_MAX, `SKU-${idx + 1}`);
-            const product = productBySku.get(cleanSku.toLowerCase());
-            if (!product) return;
-            const qty = Math.min(
-              10000,
-              Math.max(1, Math.round(row.qtySold ?? 1))
-            );
-            const lineTotal = Math.min(
-              1000000000,
-              Math.max(
-                0,
-                Math.round(
-                  row.totalSales !== undefined
-                    ? row.totalSales
-                    : product.price * qty
-                )
-              )
-            );
-            const unitPrice = Math.min(
-              1000000000,
-              row.price > 0
-                ? Math.round(row.price)
-                : qty > 0
-                  ? Math.round(lineTotal / qty)
-                  : 0
-            );
-            validEntries.push({ row, product, qty, lineTotal, unitPrice });
-          });
-
-          if (validEntries.length === 0) continue;
 
           const totalQty = Math.min(
             10000,
@@ -1986,7 +2065,7 @@ export async function importCatalogRowsToFirestore(
             subtotal: grandTotal,
             discountMode: 'none',
             discountAmount: 0,
-            adjustmentLabel: `Impor Rekapan Bulan ${saleMonth}/${saleYear}`,
+            adjustmentLabel: `Sinkron Data Penjualan ${saleMonth}/${saleYear}`,
             grandTotal,
             paymentMethod: 'cash',
             amountPaid: grandTotal,
@@ -2034,9 +2113,9 @@ export async function importCatalogRowsToFirestore(
 
           await txBatch.commit();
           report(
-            'Menyimpan rekapan penjualan...',
+            'Menyinkronkan data penjualan...',
             salesLinesImported,
-            salesRows.length
+            deltaEntries.length
           );
         }
       }
@@ -2047,6 +2126,7 @@ export async function importCatalogRowsToFirestore(
       productsUpserted,
       stocksUpdated,
       salesLinesImported,
+      salesLinesSkipped,
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'importCatalog');

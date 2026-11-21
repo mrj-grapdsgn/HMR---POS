@@ -100,6 +100,7 @@ interface AdminDashboardProps {
     productsUpserted: number;
     stocksUpdated: number;
     salesLinesImported: number;
+    salesLinesSkipped?: number;
   }>;
   onSaveProduct: (input: {
     id?: string;

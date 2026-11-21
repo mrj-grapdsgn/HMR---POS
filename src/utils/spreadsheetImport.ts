@@ -457,7 +457,18 @@ export function parseSpreadsheetMatrix(
       'kode',
       'code',
     ],
-    ['kode cabang', 'kode transaksi', 'kode invoice', 'kode voucher', 'kode promo', 'kode kasir', 'barcode']
+    [
+      'kode cabang',
+      'kode transaksi',
+      'kode invoice',
+      'no invoice',
+      'no transaksi',
+      'id transaksi',
+      'kode voucher',
+      'kode promo',
+      'kode kasir',
+      'barcode',
+    ]
   );
   const idxBarcode = findColIndex(headers, ['barcode', 'kode barcode', 'ean', 'upc']);
   const idxName = findColIndex(
@@ -476,7 +487,15 @@ export function parseSpreadsheetMatrix(
       'nama',
       'name',
     ],
-    ['nama cabang', 'nama kasir', 'nama pembeli', 'nama customer', 'nama pelanggan', 'nama toko', 'kode item']
+    [
+      'nama cabang',
+      'nama kasir',
+      'nama pembeli',
+      'nama customer',
+      'nama pelanggan',
+      'nama toko',
+      'kode item',
+    ]
   );
   const idxCategory = findColIndex(headers, [
     'kategori',
@@ -491,8 +510,18 @@ export function parseSpreadsheetMatrix(
   ]);
   const idxPrice = findColIndex(
     headers,
-    ['harga jual', 'harga satuan', 'unit price', 'harga retail', 'harga', 'price', 'het', 'hj', 'tarif'],
-    ['total harga', 'harga beli', 'harga modal', 'hpp']
+    [
+      'harga jual',
+      'harga satuan',
+      'unit price',
+      'harga retail',
+      'harga',
+      'price',
+      'het',
+      'hj',
+      'tarif',
+    ],
+    ['total harga', 'harga total', 'harga beli', 'harga modal', 'hpp']
   );
   const idxInitialStock = findColIndex(headers, [
     'stok awal',
@@ -534,6 +563,7 @@ export function parseSpreadsheetMatrix(
       'qty',
       'jumlah',
       'sold',
+      'pcs',
       'stok keluar',
       'barang keluar',
       'qty keluar',
@@ -548,13 +578,18 @@ export function parseSpreadsheetMatrix(
       'total omset',
       'nilai penjualan',
       'total harga',
+      'harga total',
+      'grand total',
+      'total bayar',
       'omset',
+      'pendapatan',
       'penjualan',
       'subtotal',
       'revenue',
       'sales',
       'total',
       'nominal',
+      'nilai',
       'amount',
     ],
     ['total stok', 'total qty', 'total item', 'total produk']
@@ -568,6 +603,7 @@ export function parseSpreadsheetMatrix(
     'lokasi',
     'store',
     'event',
+    'channel',
   ]);
   const idxMonth = findColIndex(headers, ['bulan', 'month', 'periode']);
   const idxYear = findColIndex(headers, ['tahun', 'year']);
@@ -634,18 +670,25 @@ export function parseSpreadsheetMatrix(
     const cleanName = (rawName || cleanSku).slice(0, 100);
     const category =
       (idxCategory >= 0 ? String(row[idxCategory] ?? '').trim() : '') || 'Umum';
-    const qtySold =
+    let qtySold =
       idxQtySold >= 0 ? parseRupiahOrNumber(row[idxQtySold]) : 0;
-    const totalSales =
+    let totalSales =
       idxTotalSales >= 0 ? parseRupiahOrNumber(row[idxTotalSales]) : 0;
 
     let price = idxPrice >= 0 ? parseRupiahOrNumber(row[idxPrice]) : 0;
+    if (isSalesSheet && idxQtySold < 0 && (totalSales > 0 || price > 0)) {
+      qtySold = 1;
+    }
+    if (totalSales === 0 && qtySold > 0 && price > 0) {
+      totalSales = price * qtySold;
+    }
     if (price === 0 && qtySold > 0 && totalSales > 0) {
       price = Math.round(totalSales / qtySold);
     }
 
     const hasCurrentStockCol = idxCurrentStock >= 0;
     const hasInitialStockCol = idxInitialStock >= 0;
+    const hasStockData = hasCurrentStockCol || hasInitialStockCol;
     const currentStock = hasCurrentStockCol
       ? parseRupiahOrNumber(row[idxCurrentStock])
       : 0;
@@ -701,6 +744,7 @@ export function parseSpreadsheetMatrix(
         price: price > 0 ? price : prev.price,
         initialStock: hasInitialStockCol ? initialStock : prev.initialStock,
         currentStock: hasCurrentStockCol ? currentStock : prev.currentStock,
+        hasStockData: prev.hasStockData || hasStockData,
         qtySold:
           qtySold > 0
             ? (prev.qtySold ?? 0) + qtySold
@@ -720,6 +764,7 @@ export function parseSpreadsheetMatrix(
         branchName: branchName.slice(0, 80),
         initialStock,
         currentStock,
+        hasStockData,
         qtySold: qtySold > 0 ? qtySold : undefined,
         totalSales: qtySold > 0 ? totalSales : undefined,
         saleMonth,
@@ -764,31 +809,56 @@ export function mergeSelectedTabs(
   };
   const ordered = [...chosen].sort((a, b) => order[a.kind] - order[b.kind]);
 
-  // Keep master metadata per SKU so sales-only tabs inherit price & category
+  // Keep master metadata per SKU AND per normalized Name so Data_Penjualan links seamlessly to monitoring_stok
   const masterBySku = new Map<
     string,
-    { name: string; category: string; price: number; barcode: string }
+    { sku: string; name: string; category: string; price: number; barcode: string }
+  >();
+  const masterByName = new Map<
+    string,
+    { sku: string; name: string; category: string; price: number; barcode: string }
   >();
   for (const tab of ordered) {
     for (const r of tab.rows) {
       const skuKey = r.sku.toLowerCase();
+      const nameKey = r.name.trim().toLowerCase();
       const prev = masterBySku.get(skuKey);
-      masterBySku.set(skuKey, {
+      const entry = {
+        sku: prev?.sku || r.sku,
         name: prev?.name || r.name,
         barcode: prev?.barcode || r.barcode,
         category:
           prev && prev.category !== 'Umum' ? prev.category : r.category,
         price: prev && prev.price > 0 ? prev.price : r.price,
-      });
+      };
+      masterBySku.set(skuKey, entry);
+      if (nameKey && (!masterByName.has(nameKey) || tab.kind === 'catalog')) {
+        masterByName.set(nameKey, entry);
+      }
     }
   }
 
+  const hasDedicatedSalesTab = ordered.some((t) => t.kind === 'sales');
   const merged = new Map<string, ImportedCatalogRow>();
+
   for (const tab of ordered) {
     const isSalesOnly = tab.kind === 'sales';
     for (const r of tab.rows) {
-      const skuKey = r.sku.toLowerCase();
-      const master = masterBySku.get(skuKey);
+      let resolvedSku = r.sku;
+      let master = masterBySku.get(resolvedSku.toLowerCase());
+      if (
+        isSalesOnly &&
+        (!master ||
+          resolvedSku.startsWith('PRD-') ||
+          resolvedSku.startsWith('SKU-'))
+      ) {
+        const byName = masterByName.get(r.name.trim().toLowerCase());
+        if (byName) {
+          master = byName;
+          resolvedSku = byName.sku;
+        }
+      }
+      const skuKey = resolvedSku.toLowerCase();
       const bKey = r.branchName.trim().toLowerCase();
       const yr = r.saleYear ?? new Date().getFullYear();
       const mo = r.saleMonth ?? new Date().getMonth() + 1;
@@ -796,13 +866,51 @@ export function mergeSelectedTabs(
       const baseKey = `${bKey}::${skuKey}`;
       const periodKey = `${baseKey}::${yr}::${mo}`;
 
-      // If catalog tab already inserted this (branch, sku), enrich it if same month or first sales entry
+      // When a dedicated sales tab (Data_Penjualan) is selected alongside monitoring_stok,
+      // monitoring_stok provides authoritative catalog+stock (without double-counting its summary qtySold),
+      // and Data_Penjualan provides authoritative per-month sales!
+      if (!isSalesOnly && hasDedicatedSalesTab) {
+        const prev = merged.get(baseKey);
+        if (prev) {
+          merged.set(baseKey, {
+            ...prev,
+            name: prev.name || r.name,
+            category: prev.category !== 'Umum' ? prev.category : r.category,
+            price: prev.price > 0 ? prev.price : r.price,
+            initialStock: r.hasStockData ? r.initialStock : prev.initialStock,
+            currentStock: r.hasStockData ? r.currentStock : prev.currentStock,
+            hasStockData: prev.hasStockData || r.hasStockData,
+            qtySold: undefined,
+            totalSales: undefined,
+          });
+        } else {
+          merged.set(baseKey, {
+            ...r,
+            sku: resolvedSku,
+            name: master?.name || r.name,
+            barcode: master?.barcode || r.barcode,
+            category:
+              r.category !== 'Umum' ? r.category : master?.category || 'Umum',
+            price: r.price > 0 ? r.price : master?.price || 0,
+            qtySold: undefined,
+            totalSales: undefined,
+          });
+        }
+        continue;
+      }
+
       const existingBase = merged.get(baseKey);
       if (isSalesOnly && existingBase) {
-        if (!existingBase.qtySold || (existingBase.saleYear === yr && existingBase.saleMonth === mo)) {
+        if (
+          !existingBase.qtySold ||
+          (existingBase.saleYear === yr && existingBase.saleMonth === mo)
+        ) {
           merged.set(baseKey, {
             ...existingBase,
-            price: existingBase.price > 0 ? existingBase.price : r.price || master?.price || 0,
+            price:
+              existingBase.price > 0
+                ? existingBase.price
+                : r.price || master?.price || 0,
             qtySold: (existingBase.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
             totalSales:
               (existingBase.totalSales ?? 0) + (r.totalSales ?? 0) || undefined,
@@ -816,19 +924,23 @@ export function mergeSelectedTabs(
         if (existingPeriod) {
           merged.set(periodKey, {
             ...existingPeriod,
-            qtySold: (existingPeriod.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
+            qtySold:
+              (existingPeriod.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
             totalSales:
-              (existingPeriod.totalSales ?? 0) + (r.totalSales ?? 0) || undefined,
+              (existingPeriod.totalSales ?? 0) + (r.totalSales ?? 0) ||
+              undefined,
           });
         } else {
           merged.set(periodKey, {
             ...r,
+            sku: resolvedSku,
             name: master?.name || r.name,
             barcode: master?.barcode || r.barcode,
             category: master?.category || r.category,
             price: r.price > 0 ? r.price : master?.price || 0,
             initialStock: existingBase.initialStock,
             currentStock: existingBase.currentStock,
+            hasStockData: existingBase.hasStockData,
           });
         }
         continue;
@@ -840,13 +952,11 @@ export function mergeSelectedTabs(
         merged.set(key, {
           ...prev,
           name: prev.name || r.name,
-          category:
-            prev.category !== 'Umum' ? prev.category : r.category,
+          category: prev.category !== 'Umum' ? prev.category : r.category,
           price: prev.price > 0 ? prev.price : r.price,
-          initialStock:
-            r.initialStock > 0 ? r.initialStock : prev.initialStock,
-          currentStock:
-            tab.kind === 'catalog' ? r.currentStock : prev.currentStock,
+          initialStock: r.hasStockData ? r.initialStock : prev.initialStock,
+          currentStock: r.hasStockData ? r.currentStock : prev.currentStock,
+          hasStockData: prev.hasStockData || r.hasStockData,
           qtySold: (prev.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
           totalSales:
             (prev.totalSales ?? 0) + (r.totalSales ?? 0) || undefined,
@@ -854,6 +964,7 @@ export function mergeSelectedTabs(
       } else {
         merged.set(key, {
           ...r,
+          sku: resolvedSku,
           name: master?.name || r.name,
           barcode: master?.barcode || r.barcode,
           category:
@@ -1139,7 +1250,7 @@ export async function fetchAndParseSheetUrl(
 
       if (sheetId && result.tabs.length <= 1) {
         result.warnings.push(
-          'Browser hanya bisa mengambil 1 tab via CSV dari link Google Sheet (pembatasan CORS Google). Untuk mengimpor SEMUA tab & ratusan produk sekaligus, klik tombol "Unduh Semua Tab (.xlsx)" di bawah lalu unggah file .xlsx tersebut, atau ketik Nama Tab daftar produk lengkap Anda (mis. monitoring_stok).'
+          'Browser hanya bisa mengambil 1 tab via CSV dari link Google Sheet (pembatasan CORS Google). Gunakan mode "Sinkronkan monitoring_stok + Data_Penjualan" atau unduh file .xlsx untuk mengambil semua tab.'
         );
       }
       return result;
@@ -1152,3 +1263,98 @@ export async function fetchAndParseSheetUrl(
 
   throw new Error(lastError);
 }
+
+/**
+ * Fetches multiple named tabs (e.g. ['monitoring_stok', 'Data_Penjualan']) in parallel
+ * via Google Sheets' CORS-friendly gviz CSV API and merges them into a unified workbook result.
+ */
+export async function fetchAndSyncGoogleSheetTabs(
+  rawUrl: string,
+  tabNames: string[],
+  defaultBranchName: string,
+  defaultMonth: number,
+  defaultYear: number
+): Promise<ParsedWorkbookResult> {
+  const { sheetId } = extractGoogleSheetInfo(rawUrl);
+  if (!sheetId) {
+    throw new Error(
+      'Link Google Sheet tidak valid. Tempel URL yang mengandung /spreadsheets/d/...'
+    );
+  }
+  const xlsxDownloadUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=xlsx`;
+  const cleanTabs = tabNames.map((t) => t.trim()).filter(Boolean);
+  if (cleanTabs.length === 0) {
+    return fetchAndParseSheetUrl(
+      rawUrl,
+      defaultBranchName,
+      defaultMonth,
+      defaultYear
+    );
+  }
+
+  const fetched = await Promise.all(
+    cleanTabs.map(async (tabName) => {
+      const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        return { tabName, text: '', error: `HTTP ${res.status}` };
+      }
+      const text = await res.text();
+      if (isLikelyHtmlResponse(text)) {
+        return { tabName, text: '', error: 'PRIVATE' };
+      }
+      return { tabName, text, error: null };
+    })
+  );
+
+  if (fetched.some((f) => f.error === 'PRIVATE')) {
+    throw new Error(
+      'Google Sheet masih bersifat privat. Ubah akses berbagi menjadi "Siapa saja yang memiliki link (Pelihat)", atau unduh sebagai Excel (.xlsx) lalu unggah di sebelah kiri.'
+    );
+  }
+
+  const combinedWb = XLSX.utils.book_new();
+  const seenPayloads = new Map<string, string>();
+  const warnings: string[] = [];
+
+  for (const item of fetched) {
+    if (!item.text.trim()) {
+      warnings.push(`Tab "${item.tabName}" kosong atau gagal dibaca.`);
+      continue;
+    }
+    const sig = item.text.trim().slice(0, 500);
+    if (seenPayloads.has(sig)) {
+      warnings.push(
+        `Tab "${item.tabName}" mengembalikan isi yang sama persis dengan "${seenPayloads.get(sig)}" (pastikan ejaan nama tab di Google Sheet persis sama).`
+      );
+      continue;
+    }
+    seenPayloads.set(sig, item.tabName);
+
+    const subWb = XLSX.read(item.text, { type: 'string' });
+    const fk = subWb.SheetNames[0];
+    if (fk && subWb.Sheets[fk]) {
+      XLSX.utils.book_append_sheet(combinedWb, subWb.Sheets[fk], item.tabName);
+    }
+  }
+
+  if (combinedWb.SheetNames.length === 0) {
+    throw new Error(
+      `Tidak ada data yang berhasil diambil dari tab ${cleanTabs.join(', ')}. Pastikan nama tab sesuai persis di Google Sheet Anda.`
+    );
+  }
+
+  const result = parseWorkbook(
+    combinedWb,
+    defaultBranchName,
+    defaultMonth,
+    defaultYear,
+    'csv',
+    xlsxDownloadUrl
+  );
+  if (warnings.length > 0) {
+    result.warnings = [...result.warnings, ...warnings];
+  }
+  return result;
+}
+
