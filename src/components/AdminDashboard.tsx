@@ -94,13 +94,22 @@ interface AdminDashboardProps {
   onImportRows: (
     rows: ImportedCatalogRow[],
     includeSales: boolean,
+    replacePreviousImportedSales: boolean,
     onProgress?: (progress: ImportProgress) => void
   ) => Promise<{
     branchesCreated: number;
     productsUpserted: number;
     stocksUpdated: number;
+    transactionsImported?: number;
+    transactionsSkipped?: number;
     salesLinesImported: number;
     salesLinesSkipped?: number;
+  }>;
+  onClearImportedSales: (
+    onProgress?: (progress: ImportProgress) => void
+  ) => Promise<{
+    deletedTransactions: number;
+    deletedSalesLines: number;
   }>;
   onSaveProduct: (input: {
     id?: string;
@@ -158,6 +167,7 @@ export function AdminDashboard({
   onAdjustStock,
   onReplaceLegacyCafe,
   onImportRows,
+  onClearImportedSales,
   onSaveProduct,
   onDeleteProduct,
   onSaveVoucher,
@@ -639,6 +649,7 @@ export function AdminDashboard({
                 hasLegacyCafe={hasLegacyCafe}
                 onReplaceLegacyCafe={onReplaceLegacyCafe}
                 onImportRows={onImportRows}
+                onClearImportedSales={onClearImportedSales}
                 onNotify={flashNotice}
               />
             )}

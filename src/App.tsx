@@ -28,6 +28,7 @@ import { DEFAULT_DISCOUNT } from './data/catalog';
 import { auth } from './firebase';
 import {
   adjustBranchStockAtomic,
+  clearImportedSalesData,
   createTransactionAtomic,
   deleteBranchFromFirestore,
   deleteProductFromFirestore,
@@ -725,15 +726,24 @@ export default function App() {
               activeCashierName
             )
           }
-          onImportRows={(rows, includeSales, onProgress) =>
+          onImportRows={(
+            rows,
+            includeSales,
+            replacePreviousImportedSales,
+            onProgress
+          ) =>
             importCatalogRowsToFirestore(user.uid, rows, {
               existingBranches: branches,
               existingProducts: products,
               existingStocks: branchStocks,
               includeSales,
+              replacePreviousImportedSales,
               actorName: activeCashierName,
               onProgress,
             })
+          }
+          onClearImportedSales={(onProgress) =>
+            clearImportedSalesData(user.uid, onProgress)
           }
           onSaveProduct={async (input) => {
             await saveProductToFirestore(user.uid, {

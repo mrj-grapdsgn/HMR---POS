@@ -422,7 +422,7 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(voucherId) && isOwner(existing().ownerId);
     }
 
-    // ---------- Transactions Collection (Immutable Ledger) ----------
+    // ---------- Transactions Collection (POS Immutable; Import Resyncable by Owner) ----------
     match /transactions/{transactionId} {
       allow get: if isSignedIn() && isValidId(transactionId) && isOwner(existing().ownerId);
       allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
@@ -432,7 +432,11 @@ service cloud.firestore {
         && isValidTransaction(incoming())
         && incoming().createdAt == request.time;
 
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isSignedIn()
+        && isValidId(transactionId)
+        && isOwner(existing().ownerId)
+        && existing().source == 'import';
 
       // ---------- Transaction Line Items Subcollection ----------
       match /items/{itemId} {
@@ -455,11 +459,17 @@ service cloud.firestore {
           && existsAfter(/databases/$(database)/documents/transactions/$(transactionId))
           && getAfter(/databases/$(database)/documents/transactions/$(transactionId)).data.ownerId == request.auth.uid;
 
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if isSignedIn()
+          && isValidId(transactionId)
+          && isValidId(itemId)
+          && isOwner(existing().ownerId)
+          && get(/databases/$(database)/documents/transactions/$(transactionId)).data.ownerId == request.auth.uid
+          && get(/databases/$(database)/documents/transactions/$(transactionId)).data.source == 'import';
       }
     }
 
-    // ---------- Sales Lines Analytics Collection (Immutable Ledger) ----------
+    // ---------- Sales Lines Analytics Collection (POS Immutable; Import Resyncable by Owner) ----------
     match /salesLines/{lineId} {
       allow get: if isSignedIn() && isValidId(lineId) && isOwner(existing().ownerId);
       allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
@@ -471,7 +481,11 @@ service cloud.firestore {
         && existsAfter(/databases/$(database)/documents/transactions/$(incoming().transactionId))
         && getAfter(/databases/$(database)/documents/transactions/$(incoming().transactionId)).data.ownerId == request.auth.uid;
 
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isSignedIn()
+        && isValidId(lineId)
+        && isOwner(existing().ownerId)
+        && existing().source == 'import';
     }
   }
 }

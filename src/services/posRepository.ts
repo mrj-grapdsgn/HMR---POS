@@ -83,9 +83,38 @@ function sanitizeUpperCode(raw: string, maxLen: number, fallback: string): strin
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
+const POLLUTED_CATEGORIES = new Set([
+  'persen',
+  'tidak_ada',
+  'tidak ada',
+  'nominal',
+  'fixed',
+  'percent',
+  'none',
+  'cash',
+  'tunai',
+  'qris',
+  'transfer',
+]);
+
 function sanitizeCategory(raw: string): string {
   const cleaned = raw.trim().slice(0, CATEGORY_MAX);
-  return cleaned.length > 0 ? cleaned : 'Umum';
+  if (!cleaned || POLLUTED_CATEGORIES.has(cleaned.toLowerCase())) {
+    return 'Umum';
+  }
+  return cleaned;
+}
+
+function sanitizeInvoiceNo(raw: string, fallback: string): string {
+  const cleaned = raw
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 32);
+  if (cleaned.length >= 3) return cleaned;
+  if (cleaned.length >= 1) return `TRX-${cleaned}`.slice(0, 32);
+  return fallback.slice(0, 32);
 }
 
 function sanitizeUsername(raw: string): string {
@@ -536,7 +565,7 @@ export function subscribeSalesLines(
           productId: String(data.productId ?? ''),
           productSku: String(data.productSku ?? ''),
           productName: String(data.productName ?? ''),
-          category: String(data.category ?? 'Umum'),
+          category: sanitizeCategory(String(data.category ?? 'Umum')),
           qty: Number(data.qty ?? 0),
           unitPrice: Number(data.unitPrice ?? 0),
           lineTotal: Number(data.lineTotal ?? 0),
@@ -1410,6 +1439,144 @@ export async function createTransactionAtomic(
   };
 }
 
+/* ==================== RESET IMPORTED SALES (POS SALES STAY SAFE) ==================== */
+
+export async function clearImportedSalesData(
+  ownerId: string,
+  onProgress?: (progress: ImportProgress) => void
+): Promise<{ deletedTransactions: number; deletedSalesLines: number }> {
+  const report = (stage: string, current: number, total: number) => {
+    onProgress?.({ stage, current, total });
+  };
+
+  try {
+    report('Memeriksa data penjualan impor lama...', 0, 1);
+
+    const [txSnap, slSnap] = await Promise.all([
+      getDocs(query(collection(db, 'transactions'), where('ownerId', '==', ownerId))),
+      getDocs(query(collection(db, 'salesLines'), where('ownerId', '==', ownerId))),
+    ]);
+
+    const importedTxs = txSnap.docs.filter((d) => d.data().source === 'import');
+    const importedSls = slSnap.docs.filter((d) => d.data().source === 'import');
+
+    if (importedTxs.length === 0 && importedSls.length === 0) {
+      return { deletedTransactions: 0, deletedSalesLines: 0 };
+    }
+
+    // Step 1: Fetch subcollection `items` of imported transactions in parallel groups of 15
+    const itemsByTx: Array<{
+      txId: string;
+      refs: Array<ReturnType<typeof doc>>;
+    }> = [];
+
+    for (let i = 0; i < importedTxs.length; i += 15) {
+      const slice = importedTxs.slice(i, i + 15);
+      const fetched = await Promise.all(
+        slice.map(async (txDoc) => {
+          const itemSnap = await getDocs(
+            query(
+              collection(db, 'transactions', txDoc.id, 'items'),
+              where('ownerId', '==', ownerId),
+              where('transactionId', '==', txDoc.id)
+            )
+          );
+          return {
+            txId: txDoc.id,
+            refs: itemSnap.docs.map((it) => it.ref),
+          };
+        })
+      );
+      fetched.forEach((entry) => {
+        if (entry.refs.length > 0) itemsByTx.push(entry);
+      });
+    }
+
+    // Step 2: Delete `items` BEFORE deleting parent `transactions` (items delete rule checks parent tx via get())
+    // Pack <= 4 distinct txIds and <= 100 item deletes per batch to stay strictly below Firestore's 20-get() limit.
+    const itemBatches: Array<Array<ReturnType<typeof doc>>> = [];
+    let curBatchRefs: Array<ReturnType<typeof doc>> = [];
+    let curDistinctTxs = 0;
+
+    for (const entry of itemsByTx) {
+      for (let k = 0; k < entry.refs.length; k += 100) {
+        const refChunk = entry.refs.slice(k, k + 100);
+        if (
+          curBatchRefs.length > 0 &&
+          (curDistinctTxs >= 4 || curBatchRefs.length + refChunk.length > 100)
+        ) {
+          itemBatches.push(curBatchRefs);
+          curBatchRefs = [];
+          curDistinctTxs = 0;
+        }
+        curBatchRefs.push(...refChunk);
+        curDistinctTxs += 1;
+      }
+    }
+    if (curBatchRefs.length > 0) itemBatches.push(curBatchRefs);
+
+    const totalCleanSteps =
+      itemBatches.length +
+      Math.ceil(importedTxs.length / 350) +
+      Math.ceil(importedSls.length / 350);
+    let completedSteps = 0;
+
+    report('Menghapus detail transaksi impor lama...', 0, Math.max(1, totalCleanSteps));
+
+    for (let b = 0; b < itemBatches.length; b += 3) {
+      const parallelGroup = itemBatches.slice(b, b + 3);
+      await Promise.all(
+        parallelGroup.map(async (refs) => {
+          const batch = writeBatch(db);
+          refs.forEach((ref) => batch.delete(ref));
+          await batch.commit();
+        })
+      );
+      completedSteps += parallelGroup.length;
+      report(
+        'Menghapus detail transaksi impor lama...',
+        completedSteps,
+        Math.max(1, totalCleanSteps)
+      );
+    }
+
+    // Step 3: Delete imported `transactions` docs (0 rule get() calls -> 350 per batch)
+    for (let i = 0; i < importedTxs.length; i += 350) {
+      const chunk = importedTxs.slice(i, i + 350);
+      const batch = writeBatch(db);
+      chunk.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      completedSteps += 1;
+      report(
+        'Menghapus transaksi impor lama...',
+        completedSteps,
+        Math.max(1, totalCleanSteps)
+      );
+    }
+
+    // Step 4: Delete imported `salesLines` docs (0 rule get() calls -> 350 per batch)
+    for (let i = 0; i < importedSls.length; i += 350) {
+      const chunk = importedSls.slice(i, i + 350);
+      const batch = writeBatch(db);
+      chunk.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      completedSteps += 1;
+      report(
+        'Menghapus rekapan penjualan impor lama...',
+        completedSteps,
+        Math.max(1, totalCleanSteps)
+      );
+    }
+
+    return {
+      deletedTransactions: importedTxs.length,
+      deletedSalesLines: importedSls.length,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, 'transactions');
+  }
+}
+
 /* ==================== BULK SPREADSHEET / SHEET IMPORT ==================== */
 
 export async function importCatalogRowsToFirestore(
@@ -1420,6 +1587,7 @@ export async function importCatalogRowsToFirestore(
     existingProducts: Product[];
     existingStocks: BranchStock[];
     includeSales: boolean;
+    replacePreviousImportedSales?: boolean;
     actorName: string;
     onProgress?: (progress: ImportProgress) => void;
   }
@@ -1427,6 +1595,8 @@ export async function importCatalogRowsToFirestore(
   branchesCreated: number;
   productsUpserted: number;
   stocksUpdated: number;
+  transactionsImported: number;
+  transactionsSkipped: number;
   salesLinesImported: number;
   salesLinesSkipped: number;
 }> {
@@ -1435,6 +1605,8 @@ export async function importCatalogRowsToFirestore(
       branchesCreated: 0,
       productsUpserted: 0,
       stocksUpdated: 0,
+      transactionsImported: 0,
+      transactionsSkipped: 0,
       salesLinesImported: 0,
       salesLinesSkipped: 0,
     };
@@ -1448,28 +1620,50 @@ export async function importCatalogRowsToFirestore(
   let branchesCreated = 0;
   let productsUpserted = 0;
   let stocksUpdated = 0;
+  let transactionsImported = 0;
+  let transactionsSkipped = 0;
   let salesLinesImported = 0;
   let salesLinesSkipped = 0;
 
   try {
+    // Optional clean reset of previous `source === 'import'` sales (POS cashier sales are NEVER touched!)
+    const incomingHasSales = rows.some((r) => (r.qtySold ?? 0) > 0);
+    if (
+      options.includeSales &&
+      options.replacePreviousImportedSales &&
+      incomingHasSales
+    ) {
+      await clearImportedSalesData(ownerId, options.onProgress);
+    }
+
     report('Memeriksa data existing di Firebase...', 0, rows.length);
 
-    // Fetch live snapshots from Firestore so we never overwrite existing createdAt or duplicate imported salesLines
-    const [liveBranchesSnap, liveProductsSnap, liveStocksSnap, liveSalesSnap] =
-      await Promise.all([
-        getDocs(query(collection(db, 'branches'), where('ownerId', '==', ownerId))),
-        getDocs(query(collection(db, 'products'), where('ownerId', '==', ownerId))),
-        getDocs(
-          query(collection(db, 'branchStocks'), where('ownerId', '==', ownerId))
-        ),
-        options.includeSales
-          ? getDocs(
-              query(collection(db, 'salesLines'), where('ownerId', '==', ownerId))
-            )
-          : Promise.resolve(null),
-      ]);
+    // Fetch live snapshots from Firestore so we never overwrite existing createdAt or duplicate imported sales
+    const [
+      liveBranchesSnap,
+      liveProductsSnap,
+      liveStocksSnap,
+      liveSalesSnap,
+      liveTxSnap,
+    ] = await Promise.all([
+      getDocs(query(collection(db, 'branches'), where('ownerId', '==', ownerId))),
+      getDocs(query(collection(db, 'products'), where('ownerId', '==', ownerId))),
+      getDocs(
+        query(collection(db, 'branchStocks'), where('ownerId', '==', ownerId))
+      ),
+      options.includeSales
+        ? getDocs(
+            query(collection(db, 'salesLines'), where('ownerId', '==', ownerId))
+          )
+        : Promise.resolve(null),
+      options.includeSales
+        ? getDocs(
+            query(collection(db, 'transactions'), where('ownerId', '==', ownerId))
+          )
+        : Promise.resolve(null),
+    ]);
 
-    // Track already-imported sales per (branchId, productId, year, month) so re-syncing Data_Penjualan never duplicates!
+    // Track already-imported sales per (branchId, productId, year, month) for summary-mode delta sync
     const existingImportedSales = new Map<
       string,
       { qty: number; lineTotal: number }
@@ -1484,6 +1678,20 @@ export async function importCatalogRowsToFirestore(
           qty: prev.qty + Number(data.qty ?? 0),
           lineTotal: prev.lineTotal + Number(data.lineTotal ?? 0),
         });
+      });
+    }
+
+    // Track already-imported invoiceNos per branch so per-transaction sync never duplicates existing TRX!
+    const existingImportedInvoices = new Set<string>();
+    if (liveTxSnap) {
+      liveTxSnap.docs.forEach((d) => {
+        const data = d.data();
+        if (data.source !== 'import') return;
+        const bId = String(data.branchId ?? '');
+        const inv = String(data.invoiceNo ?? '').trim().toLowerCase();
+        if (bId && inv) {
+          existingImportedInvoices.add(`${bId}::${inv}`);
+        }
       });
     }
 
@@ -1664,13 +1872,18 @@ export async function importCatalogRowsToFirestore(
         if (existing) {
           const finalPrice =
             entry.cleanPrice > 0 ? entry.cleanPrice : existing.price;
+          const existingCleanCat = sanitizeCategory(existing.category);
+          const finalCategory =
+            entry.cleanCategory !== 'Umum'
+              ? entry.cleanCategory
+              : existingCleanCat;
           pBatch.update(doc(db, 'products', existing.id), {
             sku: entry.cleanSku,
             barcode: entry.cleanBarcode,
             name: entry.cleanName,
             price: finalPrice,
             image: existing.image || '',
-            category: entry.cleanCategory,
+            category: finalCategory,
             updatedAt: serverTimestamp(),
           });
           const updatedProd: Product = {
@@ -1679,7 +1892,7 @@ export async function importCatalogRowsToFirestore(
             barcode: entry.cleanBarcode,
             name: entry.cleanName,
             price: finalPrice,
-            category: entry.cleanCategory,
+            category: finalCategory,
           };
           productBySku.set(skuKey, updatedProd);
           productById.set(existing.id, updatedProd);
@@ -1885,238 +2098,513 @@ export async function importCatalogRowsToFirestore(
       report('Menyimpan stok cabang...', stocksDone, allStockTasks.length);
     }
 
-    // PASS 3: Optional imported historical sales grouped by (branch, year, month)
-    // Uses anti-duplicate delta sync against existing imported salesLines so re-syncing Data_Penjualan never doubles totals!
+    // PASS 3: Imported historical sales
+    // Mode A (Real Per-Transaction): When rows carry `transactionCode` (from Data_Penjualan),
+    // write 1 real Firestore `transactions` doc per unique `transactionCode` so Total Transaksi reflects the real TRX count!
+    // Mode B (Monthly Summary Fallback): When rows have no `transactionCode`, use monthly delta sync.
     if (options.includeSales) {
       const rawSalesRows = rows.filter((r) => (r.qtySold ?? 0) > 0);
+      const hasPerTxCodes = rawSalesRows.some((r) =>
+        Boolean(r.transactionCode?.trim())
+      );
 
-      // Aggregate incoming rows per (branchId, productId, saleYear, saleMonth) first
-      type AggSalesEntry = {
-        branch: Branch;
-        product: Product;
-        saleYear: number;
-        saleMonth: number;
-        qty: number;
-        lineTotal: number;
-        unitPrice: number;
-      };
+      if (hasPerTxCodes) {
+        type TxLineEntry = {
+          product: Product;
+          qty: number;
+          unitPrice: number;
+          lineTotal: number;
+        };
+        type PendingTxGroup = {
+          branch: Branch;
+          invoiceNo: string;
+          saleYear: number;
+          saleMonth: number;
+          linesByProduct: Map<string, TxLineEntry>;
+        };
 
-      const incomingAgg = new Map<string, AggSalesEntry>();
-      rawSalesRows.forEach((sr, idx) => {
-        const bName = (sr.branchName.trim() || DEFAULT_BRANCH.name).slice(
-          0,
-          BRANCH_NAME_MAX
-        );
-        const branch = branchByName.get(bName.toLowerCase());
-        const cleanSku = sanitizeCode(sr.sku, SKU_MAX, `SKU-${idx + 1}`);
-        const product = productBySku.get(cleanSku.toLowerCase());
-        if (!branch || !product) return;
+        const txGroups = new Map<string, PendingTxGroup>();
+        rawSalesRows.forEach((sr, idx) => {
+          const bName = (sr.branchName.trim() || DEFAULT_BRANCH.name).slice(
+            0,
+            BRANCH_NAME_MAX
+          );
+          const branch = branchByName.get(bName.toLowerCase());
+          const cleanSku = sanitizeCode(sr.sku, SKU_MAX, `SKU-${idx + 1}`);
+          const product = productBySku.get(cleanSku.toLowerCase());
+          if (!branch || !product) return;
 
-        const saleYear = Math.min(
-          2100,
-          Math.max(2000, sr.saleYear ?? new Date().getFullYear())
-        );
-        const saleMonth = Math.min(
-          12,
-          Math.max(1, sr.saleMonth ?? new Date().getMonth() + 1)
-        );
-        const qty = Math.max(1, Math.round(sr.qtySold ?? 1));
-        const lineTotal = Math.max(
-          0,
-          Math.round(
-            sr.totalSales !== undefined ? sr.totalSales : product.price * qty
-          )
-        );
-        const unitPrice =
-          sr.price > 0
-            ? Math.round(sr.price)
-            : qty > 0
-              ? Math.round(lineTotal / qty)
-              : product.price;
+          const saleYear = Math.min(
+            2100,
+            Math.max(2000, sr.saleYear ?? new Date().getFullYear())
+          );
+          const saleMonth = Math.min(
+            12,
+            Math.max(1, sr.saleMonth ?? new Date().getMonth() + 1)
+          );
+          const invoiceNo = sanitizeInvoiceNo(
+            sr.transactionCode || '',
+            `TRX-${saleYear}${String(saleMonth).padStart(2, '0')}-${idx + 1}`
+          );
+          const qty = Math.min(10000, Math.max(1, Math.round(sr.qtySold ?? 1)));
+          const lineTotal = Math.min(
+            1000000000,
+            Math.max(
+              0,
+              Math.round(
+                sr.totalSales !== undefined ? sr.totalSales : product.price * qty
+              )
+            )
+          );
+          const unitPrice = Math.min(
+            1000000000,
+            sr.price > 0
+              ? Math.round(sr.price)
+              : qty > 0
+                ? Math.round(lineTotal / qty)
+                : product.price
+          );
 
-        const aggKey = `${branch.id}::${product.id}::${saleYear}::${saleMonth}`;
-        const prev = incomingAgg.get(aggKey);
-        if (prev) {
-          incomingAgg.set(aggKey, {
-            ...prev,
-            qty: prev.qty + qty,
-            lineTotal: prev.lineTotal + lineTotal,
-            unitPrice: prev.unitPrice > 0 ? prev.unitPrice : unitPrice,
-          });
-        } else {
-          incomingAgg.set(aggKey, {
-            branch,
-            product,
-            saleYear,
-            saleMonth,
-            qty,
-            lineTotal,
+          const gKey = `${branch.id}::${invoiceNo.toLowerCase()}`;
+          let group = txGroups.get(gKey);
+          if (!group) {
+            group = {
+              branch,
+              invoiceNo,
+              saleYear,
+              saleMonth,
+              linesByProduct: new Map<string, TxLineEntry>(),
+            };
+            txGroups.set(gKey, group);
+          }
+
+          const prevLine = group.linesByProduct.get(product.id);
+          if (prevLine) {
+            const nextQty = Math.min(10000, prevLine.qty + qty);
+            const nextTotal = Math.min(1000000000, prevLine.lineTotal + lineTotal);
+            group.linesByProduct.set(product.id, {
+              product,
+              qty: nextQty,
+              unitPrice: prevLine.unitPrice > 0 ? prevLine.unitPrice : unitPrice,
+              lineTotal: nextTotal,
+            });
+          } else {
+            group.linesByProduct.set(product.id, {
+              product,
+              qty,
+              unitPrice,
+              lineTotal,
+            });
+          }
+        });
+
+        type FinalTxToWrite = {
+          branch: Branch;
+          invoiceNo: string;
+          saleYear: number;
+          saleMonth: number;
+          lines: TxLineEntry[];
+        };
+
+        const pendingTxs: FinalTxToWrite[] = [];
+        for (const [gKey, group] of txGroups.entries()) {
+          const allLines = Array.from(group.linesByProduct.values());
+          if (allLines.length === 0) continue;
+
+          if (existingImportedInvoices.has(gKey)) {
+            transactionsSkipped += 1;
+            salesLinesSkipped += allLines.length;
+            continue;
+          }
+
+          // Split abnormally huge single-invoice groups so itemCount <= 60 & totalQty <= 9000
+          let subChunk: TxLineEntry[] = [];
+          let subQty = 0;
+          let part = 1;
+          for (const line of allLines) {
+            if (
+              subChunk.length >= 60 ||
+              (subChunk.length > 0 && subQty + line.qty > 9000)
+            ) {
+              const partInvoice =
+                part === 1
+                  ? group.invoiceNo
+                  : sanitizeInvoiceNo(`${group.invoiceNo}-${part}`, group.invoiceNo);
+              pendingTxs.push({
+                branch: group.branch,
+                invoiceNo: partInvoice,
+                saleYear: group.saleYear,
+                saleMonth: group.saleMonth,
+                lines: subChunk,
+              });
+              subChunk = [];
+              subQty = 0;
+              part += 1;
+            }
+            subChunk.push(line);
+            subQty += line.qty;
+          }
+          if (subChunk.length > 0) {
+            const partInvoice =
+              part === 1
+                ? group.invoiceNo
+                : sanitizeInvoiceNo(`${group.invoiceNo}-${part}`, group.invoiceNo);
+            pendingTxs.push({
+              branch: group.branch,
+              invoiceNo: partInvoice,
+              saleYear: group.saleYear,
+              saleMonth: group.saleMonth,
+              lines: subChunk,
+            });
+          }
+        }
+
+        if (pendingTxs.length > 0) {
+          report('Menyimpan transaksi penjualan...', 0, pendingTxs.length);
+
+          // Pack <= 5 distinct transactions AND <= 150 writes per writeBatch
+          // (5 distinct txIds -> at most 10 existsAfter/getAfter rule calls, strictly under Firestore's 20 limit!)
+          const txBatches: FinalTxToWrite[][] = [];
+          let curBatch: FinalTxToWrite[] = [];
+          let curWrites = 0;
+
+          for (const txItem of pendingTxs) {
+            const neededWrites = 1 + txItem.lines.length * 2;
+            if (
+              curBatch.length > 0 &&
+              (curBatch.length >= 5 || curWrites + neededWrites > 150)
+            ) {
+              txBatches.push(curBatch);
+              curBatch = [];
+              curWrites = 0;
+            }
+            curBatch.push(txItem);
+            curWrites += neededWrites;
+          }
+          if (curBatch.length > 0) txBatches.push(curBatch);
+
+          const baseStamp = Date.now();
+          let txsDone = 0;
+
+          for (let b = 0; b < txBatches.length; b += 3) {
+            const parallelGroup = txBatches.slice(b, b + 3);
+            await Promise.all(
+              parallelGroup.map(async (batchTxs, groupOffset) => {
+                const txBatch = writeBatch(db);
+                batchTxs.forEach((txItem, txOffset) => {
+                  const txId = sanitizeId(
+                    `tx-imp-${baseStamp}-${b + groupOffset}-${txOffset}-${Math.random().toString(36).slice(2, 5)}`,
+                    'tx'
+                  );
+                  const totalQty = Math.min(
+                    10000,
+                    Math.max(1, txItem.lines.reduce((s, l) => s + l.qty, 0))
+                  );
+                  const grandTotal = Math.min(
+                    1000000000,
+                    txItem.lines.reduce((s, l) => s + l.lineTotal, 0)
+                  );
+
+                  txBatch.set(doc(db, 'transactions', txId), {
+                    ownerId,
+                    branchId: txItem.branch.id,
+                    branchName: txItem.branch.name,
+                    invoiceNo: txItem.invoiceNo,
+                    cashierName: actor,
+                    saleYear: txItem.saleYear,
+                    saleMonth: txItem.saleMonth,
+                    source: 'import',
+                    itemCount: Math.max(1, txItem.lines.length),
+                    totalQty,
+                    subtotal: grandTotal,
+                    discountMode: 'none',
+                    discountAmount: 0,
+                    adjustmentLabel: `Sinkron Data Penjualan ${txItem.saleMonth}/${txItem.saleYear}`,
+                    grandTotal,
+                    paymentMethod: 'cash',
+                    amountPaid: grandTotal,
+                    change: 0,
+                    createdAt: serverTimestamp(),
+                  });
+
+                  txItem.lines.forEach((line, lineIdx) => {
+                    const itemId = sanitizeId(
+                      `item-${lineIdx + 1}-${line.product.id}`,
+                      'item'
+                    );
+                    txBatch.set(doc(db, 'transactions', txId, 'items', itemId), {
+                      ownerId,
+                      transactionId: txId,
+                      productId: line.product.id,
+                      name: line.product.name,
+                      unitPrice: line.unitPrice,
+                      qty: line.qty,
+                      lineTotal: line.lineTotal,
+                      createdAt: serverTimestamp(),
+                    });
+
+                    const slId = sanitizeId(`sl-${txId}-${lineIdx + 1}`, 'sl');
+                    txBatch.set(doc(db, 'salesLines', slId), {
+                      ownerId,
+                      transactionId: txId,
+                      branchId: txItem.branch.id,
+                      branchName: txItem.branch.name,
+                      productId: line.product.id,
+                      productSku: line.product.sku,
+                      productName: line.product.name,
+                      category: sanitizeCategory(line.product.category),
+                      qty: line.qty,
+                      unitPrice: line.unitPrice,
+                      lineTotal: line.lineTotal,
+                      saleYear: txItem.saleYear,
+                      saleMonth: txItem.saleMonth,
+                      source: 'import',
+                      createdAt: serverTimestamp(),
+                    });
+                  });
+                });
+
+                await txBatch.commit();
+              })
+            );
+
+            for (const batchTxs of parallelGroup) {
+              transactionsImported += batchTxs.length;
+              txsDone += batchTxs.length;
+              for (const txItem of batchTxs) {
+                salesLinesImported += txItem.lines.length;
+              }
+            }
+            report('Menyimpan transaksi penjualan...', txsDone, pendingTxs.length);
+          }
+        }
+      } else {
+        // Monthly Summary Fallback Mode (no transactionCode column)
+        type AggSalesEntry = {
+          branch: Branch;
+          product: Product;
+          saleYear: number;
+          saleMonth: number;
+          qty: number;
+          lineTotal: number;
+          unitPrice: number;
+        };
+
+        const incomingAgg = new Map<string, AggSalesEntry>();
+        rawSalesRows.forEach((sr, idx) => {
+          const bName = (sr.branchName.trim() || DEFAULT_BRANCH.name).slice(
+            0,
+            BRANCH_NAME_MAX
+          );
+          const branch = branchByName.get(bName.toLowerCase());
+          const cleanSku = sanitizeCode(sr.sku, SKU_MAX, `SKU-${idx + 1}`);
+          const product = productBySku.get(cleanSku.toLowerCase());
+          if (!branch || !product) return;
+
+          const saleYear = Math.min(
+            2100,
+            Math.max(2000, sr.saleYear ?? new Date().getFullYear())
+          );
+          const saleMonth = Math.min(
+            12,
+            Math.max(1, sr.saleMonth ?? new Date().getMonth() + 1)
+          );
+          const qty = Math.max(1, Math.round(sr.qtySold ?? 1));
+          const lineTotal = Math.max(
+            0,
+            Math.round(
+              sr.totalSales !== undefined ? sr.totalSales : product.price * qty
+            )
+          );
+          const unitPrice =
+            sr.price > 0
+              ? Math.round(sr.price)
+              : qty > 0
+                ? Math.round(lineTotal / qty)
+                : product.price;
+
+          const aggKey = `${branch.id}::${product.id}::${saleYear}::${saleMonth}`;
+          const prev = incomingAgg.get(aggKey);
+          if (prev) {
+            incomingAgg.set(aggKey, {
+              ...prev,
+              qty: prev.qty + qty,
+              lineTotal: prev.lineTotal + lineTotal,
+              unitPrice: prev.unitPrice > 0 ? prev.unitPrice : unitPrice,
+            });
+          } else {
+            incomingAgg.set(aggKey, {
+              branch,
+              product,
+              saleYear,
+              saleMonth,
+              qty,
+              lineTotal,
+              unitPrice,
+            });
+          }
+        });
+
+        const deltaEntries: AggSalesEntry[] = [];
+        for (const [aggKey, entry] of incomingAgg.entries()) {
+          const already = existingImportedSales.get(aggKey);
+          if (already && already.qty >= entry.qty) {
+            salesLinesSkipped += 1;
+            continue;
+          }
+          const deltaQty = Math.min(
+            10000,
+            Math.max(1, entry.qty - (already?.qty ?? 0))
+          );
+          const deltaTotal = Math.min(
+            1000000000,
+            Math.max(0, entry.lineTotal - (already?.lineTotal ?? 0))
+          );
+          const unitPrice = Math.min(
+            1000000000,
+            entry.unitPrice > 0
+              ? entry.unitPrice
+              : deltaQty > 0
+                ? Math.round(deltaTotal / deltaQty)
+                : 0
+          );
+          deltaEntries.push({
+            ...entry,
+            qty: deltaQty,
+            lineTotal: deltaTotal,
             unitPrice,
           });
         }
-      });
 
-      // Compute delta against already-imported salesLines
-      const deltaEntries: AggSalesEntry[] = [];
-      for (const [aggKey, entry] of incomingAgg.entries()) {
-        const already = existingImportedSales.get(aggKey);
-        if (already && already.qty >= entry.qty) {
-          salesLinesSkipped += 1;
-          continue;
+        if (deltaEntries.length > 0) {
+          report('Menyinkronkan data penjualan...', 0, deltaEntries.length);
         }
-        const deltaQty = Math.min(
-          10000,
-          Math.max(1, entry.qty - (already?.qty ?? 0))
-        );
-        const deltaTotal = Math.min(
-          1000000000,
-          Math.max(0, entry.lineTotal - (already?.lineTotal ?? 0))
-        );
-        const unitPrice = Math.min(
-          1000000000,
-          entry.unitPrice > 0
-            ? entry.unitPrice
-            : deltaQty > 0
-              ? Math.round(deltaTotal / deltaQty)
-              : 0
-        );
-        deltaEntries.push({
-          ...entry,
-          qty: deltaQty,
-          lineTotal: deltaTotal,
-          unitPrice,
-        });
-      }
 
-      if (deltaEntries.length > 0) {
-        report('Menyinkronkan data penjualan...', 0, deltaEntries.length);
-      }
+        const groups = new Map<string, AggSalesEntry[]>();
+        for (const entry of deltaEntries) {
+          const gKey = `${entry.branch.id}::${entry.saleYear}::${entry.saleMonth}`;
+          const list = groups.get(gKey) ?? [];
+          list.push(entry);
+          groups.set(gKey, list);
+        }
 
-      const groups = new Map<string, AggSalesEntry[]>();
-      for (const entry of deltaEntries) {
-        const gKey = `${entry.branch.id}::${entry.saleYear}::${entry.saleMonth}`;
-        const list = groups.get(gKey) ?? [];
-        list.push(entry);
-        groups.set(gKey, list);
-      }
+        let groupIdx = 0;
+        for (const [, groupRows] of groups.entries()) {
+          groupIdx += 1;
+          const first = groupRows[0];
+          const branch = first.branch;
+          const saleYear = first.saleYear;
+          const saleMonth = first.saleMonth;
 
-      let groupIdx = 0;
-      for (const [, groupRows] of groups.entries()) {
-        groupIdx += 1;
-        const first = groupRows[0];
-        const branch = first.branch;
-        const saleYear = first.saleYear;
-        const saleMonth = first.saleMonth;
+          const chunks: AggSalesEntry[][] = [];
+          let currentChunk: AggSalesEntry[] = [];
+          let currentChunkQty = 0;
 
-        // Build chunks respecting both itemCount <= 50 and totalQty <= 9000 (rule limit is 10000)
-        const chunks: AggSalesEntry[][] = [];
-        let currentChunk: AggSalesEntry[] = [];
-        let currentChunkQty = 0;
-
-        for (const entry of groupRows) {
-          if (
-            currentChunk.length >= 50 ||
-            (currentChunk.length > 0 && currentChunkQty + entry.qty > 9000)
-          ) {
-            chunks.push(currentChunk);
-            currentChunk = [];
-            currentChunkQty = 0;
+          for (const entry of groupRows) {
+            if (
+              currentChunk.length >= 50 ||
+              (currentChunk.length > 0 && currentChunkQty + entry.qty > 9000)
+            ) {
+              chunks.push(currentChunk);
+              currentChunk = [];
+              currentChunkQty = 0;
+            }
+            currentChunk.push(entry);
+            currentChunkQty += entry.qty;
           }
-          currentChunk.push(entry);
-          currentChunkQty += entry.qty;
-        }
-        if (currentChunk.length > 0) chunks.push(currentChunk);
+          if (currentChunk.length > 0) chunks.push(currentChunk);
 
-        for (let c = 0; c < chunks.length; c++) {
-          const validEntries = chunks[c];
-          if (validEntries.length === 0) continue;
+          for (let c = 0; c < chunks.length; c++) {
+            const validEntries = chunks[c];
+            if (validEntries.length === 0) continue;
 
-          const txId = sanitizeId(
-            `tx-imp-${Date.now()}-${groupIdx}-${c}-${Math.random().toString(36).slice(2, 5)}`,
-            'tx'
-          );
-          const invoiceNo = sanitizeCode(
-            `IMP-${saleYear}${String(saleMonth).padStart(2, '0')}-${String(groupIdx).padStart(2, '0')}-${c + 1}`,
-            32,
-            'IMP-01'
-          );
-
-          const totalQty = Math.min(
-            10000,
-            validEntries.reduce((s, e) => s + e.qty, 0)
-          );
-          const grandTotal = Math.min(
-            1000000000,
-            validEntries.reduce((s, e) => s + e.lineTotal, 0)
-          );
-
-          const txBatch = writeBatch(db);
-          txBatch.set(doc(db, 'transactions', txId), {
-            ownerId,
-            branchId: branch.id,
-            branchName: branch.name,
-            invoiceNo,
-            cashierName: actor,
-            saleYear,
-            saleMonth,
-            source: 'import',
-            itemCount: validEntries.length,
-            totalQty: Math.max(1, totalQty),
-            subtotal: grandTotal,
-            discountMode: 'none',
-            discountAmount: 0,
-            adjustmentLabel: `Sinkron Data Penjualan ${saleMonth}/${saleYear}`,
-            grandTotal,
-            paymentMethod: 'cash',
-            amountPaid: grandTotal,
-            change: 0,
-            createdAt: serverTimestamp(),
-          });
-
-          validEntries.forEach((entry, idx) => {
-            const itemId = sanitizeId(
-              `item-${idx + 1}-${entry.product.id}`,
-              'item'
+            const txId = sanitizeId(
+              `tx-imp-${Date.now()}-${groupIdx}-${c}-${Math.random().toString(36).slice(2, 5)}`,
+              'tx'
             );
-            txBatch.set(doc(db, 'transactions', txId, 'items', itemId), {
-              ownerId,
-              transactionId: txId,
-              productId: entry.product.id,
-              name: entry.product.name,
-              unitPrice: entry.unitPrice,
-              qty: entry.qty,
-              lineTotal: entry.lineTotal,
-              createdAt: serverTimestamp(),
-            });
+            const invoiceNo = sanitizeInvoiceNo(
+              `IMP-${saleYear}${String(saleMonth).padStart(2, '0')}-${String(groupIdx).padStart(2, '0')}-${c + 1}`,
+              'IMP-01'
+            );
 
-            const slId = sanitizeId(`sl-${txId}-${idx + 1}`, 'sl');
-            txBatch.set(doc(db, 'salesLines', slId), {
+            const totalQty = Math.min(
+              10000,
+              validEntries.reduce((s, e) => s + e.qty, 0)
+            );
+            const grandTotal = Math.min(
+              1000000000,
+              validEntries.reduce((s, e) => s + e.lineTotal, 0)
+            );
+
+            const txBatch = writeBatch(db);
+            txBatch.set(doc(db, 'transactions', txId), {
               ownerId,
-              transactionId: txId,
               branchId: branch.id,
               branchName: branch.name,
-              productId: entry.product.id,
-              productSku: entry.product.sku,
-              productName: entry.product.name,
-              category: entry.product.category,
-              qty: entry.qty,
-              unitPrice: entry.unitPrice,
-              lineTotal: entry.lineTotal,
+              invoiceNo,
+              cashierName: actor,
               saleYear,
               saleMonth,
               source: 'import',
+              itemCount: validEntries.length,
+              totalQty: Math.max(1, totalQty),
+              subtotal: grandTotal,
+              discountMode: 'none',
+              discountAmount: 0,
+              adjustmentLabel: `Sinkron Data Penjualan ${saleMonth}/${saleYear}`,
+              grandTotal,
+              paymentMethod: 'cash',
+              amountPaid: grandTotal,
+              change: 0,
               createdAt: serverTimestamp(),
             });
 
-            salesLinesImported += 1;
-          });
+            validEntries.forEach((entry, idx) => {
+              const itemId = sanitizeId(
+                `item-${idx + 1}-${entry.product.id}`,
+                'item'
+              );
+              txBatch.set(doc(db, 'transactions', txId, 'items', itemId), {
+                ownerId,
+                transactionId: txId,
+                productId: entry.product.id,
+                name: entry.product.name,
+                unitPrice: entry.unitPrice,
+                qty: entry.qty,
+                lineTotal: entry.lineTotal,
+                createdAt: serverTimestamp(),
+              });
 
-          await txBatch.commit();
-          report(
-            'Menyinkronkan data penjualan...',
-            salesLinesImported,
-            deltaEntries.length
-          );
+              const slId = sanitizeId(`sl-${txId}-${idx + 1}`, 'sl');
+              txBatch.set(doc(db, 'salesLines', slId), {
+                ownerId,
+                transactionId: txId,
+                branchId: branch.id,
+                branchName: branch.name,
+                productId: entry.product.id,
+                productSku: entry.product.sku,
+                productName: entry.product.name,
+                category: sanitizeCategory(entry.product.category),
+                qty: entry.qty,
+                unitPrice: entry.unitPrice,
+                lineTotal: entry.lineTotal,
+                saleYear,
+                saleMonth,
+                source: 'import',
+                createdAt: serverTimestamp(),
+              });
+
+              salesLinesImported += 1;
+            });
+
+            await txBatch.commit();
+            transactionsImported += 1;
+            report(
+              'Menyinkronkan data penjualan...',
+              salesLinesImported,
+              deltaEntries.length
+            );
+          }
         }
       }
     }
@@ -2125,6 +2613,8 @@ export async function importCatalogRowsToFirestore(
       branchesCreated,
       productsUpserted,
       stocksUpdated,
+      transactionsImported,
+      transactionsSkipped,
       salesLinesImported,
       salesLinesSkipped,
     };

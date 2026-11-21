@@ -9,6 +9,7 @@ import {
   Link2,
   Loader2,
   RefreshCw,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import { HIKEMORE_SEED_ROWS, MONTH_OPTIONS } from '../data/catalog';
@@ -42,13 +43,22 @@ interface ImportMigrationPanelProps {
   onImportRows: (
     rows: ImportedCatalogRow[],
     includeSales: boolean,
+    replacePreviousImportedSales: boolean,
     onProgress?: (progress: ImportProgress) => void
   ) => Promise<{
     branchesCreated: number;
     productsUpserted: number;
     stocksUpdated: number;
+    transactionsImported?: number;
+    transactionsSkipped?: number;
     salesLinesImported: number;
     salesLinesSkipped?: number;
+  }>;
+  onClearImportedSales: (
+    onProgress?: (progress: ImportProgress) => void
+  ) => Promise<{
+    deletedTransactions: number;
+    deletedSalesLines: number;
   }>;
   onNotify: (msg: string) => void;
 }
@@ -69,6 +79,7 @@ export function ImportMigrationPanel({
   hasLegacyCafe,
   onReplaceLegacyCafe,
   onImportRows,
+  onClearImportedSales,
   onNotify,
 }: ImportMigrationPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -94,6 +105,8 @@ export function ImportMigrationPanel({
     new Date().getFullYear()
   );
   const [includeSales, setIncludeSales] = useState(true);
+  const [replacePreviousImportedSales, setReplacePreviousImportedSales] =
+    useState(true);
 
   const [parsedTabs, setParsedTabs] = useState<ParsedSheetTab[]>([]);
   const [selectedTabNames, setSelectedTabNames] = useState<string[]>([]);
@@ -108,6 +121,8 @@ export function ImportMigrationPanel({
   const [showAllPreview, setShowAllPreview] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [clearingImported, setClearingImported] = useState(false);
+  const [confirmResetImport, setConfirmResetImport] = useState(false);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [migratingLegacy, setMigratingLegacy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -121,17 +136,25 @@ export function ImportMigrationPanel({
 
   const previewStats = useMemo(() => {
     const skus = new Set(previewRows.map((r) => r.sku.toLowerCase()));
-    const totalQtySold = previewRows.reduce((s, r) => s + (r.qtySold ?? 0), 0);
-    const totalOmset = previewRows.reduce(
-      (s, r) =>
-        s +
-        (r.totalSales !== undefined
-          ? r.totalSales
-          : (r.qtySold ?? 0) * r.price),
-      0
-    );
+    const txCodes = new Set<string>();
+    let totalQtySold = 0;
+    let totalOmset = 0;
+    for (const r of previewRows) {
+      if ((r.qtySold ?? 0) > 0) {
+        totalQtySold += r.qtySold ?? 0;
+        totalOmset +=
+          r.totalSales !== undefined ? r.totalSales : (r.qtySold ?? 0) * r.price;
+        if (r.transactionCode?.trim()) {
+          txCodes.add(
+            `${r.branchName.toLowerCase()}::${r.transactionCode.trim().toLowerCase()}`
+          );
+        }
+      }
+    }
     return {
       uniqueSkus: skus.size,
+      uniqueTxCount: txCodes.size,
+      hasTxCodes: txCodes.size > 0,
       totalQtySold,
       totalOmset,
     };
@@ -329,24 +352,33 @@ export function ImportMigrationPanel({
       const summary = await onImportRows(
         normalizedRows,
         includeSales,
+        replacePreviousImportedSales,
         (prog) => setProgress(prog)
       );
+      const txImported = summary.transactionsImported ?? 0;
+      const txSkipped = summary.transactionsSkipped ?? 0;
       const skippedText =
-        summary.salesLinesSkipped && summary.salesLinesSkipped > 0
-          ? ` (${summary.salesLinesSkipped} baris penjualan sudah sinkron & dilewati agar tidak ganda)`
-          : '';
+        txSkipped > 0
+          ? ` (${txSkipped} transaksi sudah ada & dilewati agar tidak ganda)`
+          : summary.salesLinesSkipped && summary.salesLinesSkipped > 0
+            ? ` (${summary.salesLinesSkipped} baris penjualan sudah sinkron & dilewati agar tidak ganda)`
+            : '';
       const msg = `Berhasil disinkronkan ke Firebase: ${summary.productsUpserted} produk, ${summary.stocksUpdated} stok cabang${
         summary.branchesCreated > 0
           ? `, ${summary.branchesCreated} cabang baru`
           : ''
       }${
+        txImported > 0 ? `, ${txImported} transaksi (TRX) baru` : ''
+      }${
         summary.salesLinesImported > 0
-          ? `, ${summary.salesLinesImported} baris penjualan baru`
+          ? ` (${summary.salesLinesImported} baris penjualan)`
           : ''
       }${skippedText}.`;
       setResultMsg(msg);
       onNotify(
-        `Sinkronisasi selesai (${summary.productsUpserted} produk, ${summary.salesLinesImported} penjualan baru)`
+        `Sinkronisasi selesai (${summary.productsUpserted} produk${
+          txImported > 0 ? `, ${txImported} TRX` : ''
+        })`
       );
       clearPreview();
     } catch (err) {
@@ -355,6 +387,36 @@ export function ImportMigrationPanel({
       );
     } finally {
       setSaving(false);
+      setProgress(null);
+    }
+  };
+
+  const handleClearImportedSales = async () => {
+    setErrorMsg(null);
+    setResultMsg(null);
+    setClearingImported(true);
+    setConfirmResetImport(false);
+    setProgress({
+      stage: 'Menghapus data penjualan impor lama...',
+      current: 0,
+      total: 1,
+    });
+    try {
+      const res = await onClearImportedSales((prog) => setProgress(prog));
+      const msg =
+        res.deletedTransactions === 0 && res.deletedSalesLines === 0
+          ? 'Tidak ada data penjualan impor lama yang perlu dihapus.'
+          : `Data penjualan impor lama dibersihkan (${res.deletedTransactions} transaksi impor & ${res.deletedSalesLines} baris rekapan). Transaksi kasir POS tetap aman.`;
+      setResultMsg(msg);
+      onNotify('Data penjualan impor lama berhasil dibersihkan');
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'Gagal membersihkan data penjualan impor lama.'
+      );
+    } finally {
+      setClearingImported(false);
       setProgress(null);
     }
   };
@@ -717,8 +779,8 @@ export function ImportMigrationPanel({
         </div>
       )}
 
-      {/* Live Save Progress Banner */}
-      {saving && progress && (
+      {/* Live Save / Cleanup Progress Banner */}
+      {(saving || clearingImported) && progress && (
         <div className="space-y-2 rounded-xl border border-sky-200 bg-sky-50 p-4">
           <div className="flex items-center justify-between text-xs font-bold text-sky-900">
             <span className="flex items-center gap-2">
@@ -747,46 +809,127 @@ export function ImportMigrationPanel({
         </div>
       )}
 
-      {/* Multi-Tab Sheet Selector (when workbook has > 1 detected tab) */}
-      {parsedTabs.length > 1 && (
-        <div className="space-y-2.5 rounded-xl border border-slate-200 bg-white p-4">
+      {/* Utility Bar: Reset Imported Sales Data Only (POS Sales Stay Safe) */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+        <div className="text-xs text-slate-600">
+          <strong className="text-slate-800">
+            Perbaikan Data Penjualan Impor:
+          </strong>{' '}
+          Jika angka TRX atau kategori impor sebelumnya keliru, bersihkan
+          khusus data hasil impor lalu sinkronkan ulang. Transaksi kasir POS
+          asli tidak tersentuh.
+        </div>
+        {confirmResetImport ? (
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-semibold text-rose-700">
+              Hapus semua penjualan impor lama?
+            </span>
+            <button
+              type="button"
+              disabled={clearingImported || saving}
+              onClick={() => void handleClearImportedSales()}
+              className="h-8 rounded-lg bg-rose-600 px-3 text-xs font-bold text-white hover:bg-rose-700 disabled:opacity-50"
+            >
+              Ya, Bersihkan
+            </button>
+            <button
+              type="button"
+              disabled={clearingImported}
+              onClick={() => setConfirmResetImport(false)}
+              className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Batal
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={clearingImported || saving}
+            onClick={() => setConfirmResetImport(true)}
+            className="flex h-8 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50 whitespace-nowrap"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span>Reset Data Penjualan Impor</span>
+          </button>
+        )}
+      </div>
+
+      {/* Multi-Tab Sheet Selector & Detected Column Mapping */}
+      {parsedTabs.length > 0 && (
+        <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
               <Layers className="h-4 w-4 text-[#1B8EE6]" />
               <span>
-                Tab Spreadsheet Terdeteksi ({parsedTabs.length} tab)
+                Tab & Pemetaan Kolom Terdeteksi ({parsedTabs.length} tab)
               </span>
             </div>
-            <span className="text-[11px] text-slate-500">
-              Jika <strong>monitoring_stok</strong> &{' '}
-              <strong>Data_Penjualan</strong> dipilih bersama, stok diambil dari{' '}
-              <em>monitoring_stok</em> dan penjualan dari <em>Data_Penjualan</em>{' '}
-              tanpa hitung ganda
-            </span>
+            {parsedTabs.length > 1 && (
+              <span className="text-[11px] text-slate-500">
+                Jika <strong>monitoring_stok</strong> &{' '}
+                <strong>Data_Penjualan</strong> dipilih bersama, stok diambil
+                dari <em>monitoring_stok</em> dan penjualan per TRX dari{' '}
+                <em>Data_Penjualan</em> tanpa hitung ganda
+              </span>
+            )}
           </div>
-          <div className="flex flex-wrap gap-2">
+
+          <div className="space-y-2">
             {parsedTabs.map((tab) => {
               const checked = selectedTabNames.includes(tab.sheetName);
+              const cols = tab.detectedColumns;
+              const colItems: Array<[string, string | undefined]> = [
+                ['ID Trx', cols.txId],
+                ['SKU', cols.sku],
+                ['Produk', cols.name],
+                ['Kategori', cols.category],
+                ['Cabang', cols.branch],
+                ['Harga', cols.price],
+                ['Stok', cols.currentStock],
+                ['Qty', cols.qtySold],
+                ['Total', cols.totalSales],
+                ['Tanggal', cols.date],
+              ].filter((entry): entry is [string, string] => Boolean(entry[1]));
+
               return (
-                <label
+                <div
                   key={tab.sheetName}
-                  className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  className={`rounded-lg border p-2.5 text-xs transition-colors ${
                     checked
-                      ? 'border-[#1B8EE6] bg-sky-50 text-slate-900'
-                      : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                      ? 'border-[#1B8EE6] bg-sky-50/70 text-slate-900'
+                      : 'border-slate-200 bg-slate-50 text-slate-600'
                   }`}
                 >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleTabSelection(tab.sheetName)}
-                    className="h-3.5 w-3.5 accent-[#1B8EE6]"
-                  />
-                  <span className="font-bold">{tab.sheetName}</span>
-                  <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
-                    {TAB_KIND_LABEL[tab.kind]} · {tab.rows.length} baris
-                  </span>
-                </label>
+                  <label className="flex cursor-pointer flex-wrap items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleTabSelection(tab.sheetName)}
+                      className="h-3.5 w-3.5 accent-[#1B8EE6]"
+                    />
+                    <span className="font-bold">{tab.sheetName}</span>
+                    <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+                      {TAB_KIND_LABEL[tab.kind]} · {tab.rows.length} baris
+                      {tab.uniqueTxCount > 0
+                        ? ` · ${tab.uniqueTxCount} TRX unik`
+                        : ''}
+                    </span>
+                  </label>
+                  {colItems.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 pl-5 text-[11px] text-slate-600">
+                      {colItems.map(([label, headerName]) => (
+                        <span key={label}>
+                          <span className="font-semibold text-slate-500">
+                            {label}:
+                          </span>{' '}
+                          <span className="font-mono-num font-semibold text-slate-800">
+                            {headerName}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -797,14 +940,18 @@ export function ImportMigrationPanel({
       {previewRows.length > 0 && (
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
-            <div>
+            <div className="space-y-1">
               <div className="text-xs font-bold text-slate-900">
                 Pratinjau Data Siap Disinkronkan ({previewRows.length} baris ·{' '}
-                {previewStats.uniqueSkus} produk unik ·{' '}
+                {previewStats.uniqueSkus} produk unik
+                {previewStats.uniqueTxCount > 0
+                  ? ` · ${previewStats.uniqueTxCount} trx`
+                  : ''}
+                {' · '}
                 {previewStats.totalQtySold} pcs terjual ·{' '}
                 {formatRupiah(previewStats.totalOmset)} · {sourceLabel})
               </div>
-              <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs text-slate-600">
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-600">
                 <input
                   type="checkbox"
                   checked={includeSales}
@@ -812,15 +959,31 @@ export function ImportMigrationPanel({
                   className="h-3.5 w-3.5 accent-[#1B8EE6]"
                 />
                 <span>
-                  Sinkronkan data penjualan (Qty Terjual & Omset) ke Dasbor
+                  Sinkronkan data penjualan (TRX, Qty Terjual & Omset) ke Dasbor
                   Rekapan & Analisis Restok
                 </span>
               </label>
+              {includeSales && previewStats.totalQtySold > 0 && (
+                <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={replacePreviousImportedSales}
+                    onChange={(e) =>
+                      setReplacePreviousImportedSales(e.target.checked)
+                    }
+                    className="h-3.5 w-3.5 accent-[#1B8EE6]"
+                  />
+                  <span>
+                    Ganti data penjualan impor lama (perbaiki jumlah TRX &
+                    kategori lama; transaksi kasir POS tetap aman)
+                  </span>
+                </label>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                disabled={saving}
+                disabled={saving || clearingImported}
                 onClick={clearPreview}
                 className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
               >
@@ -828,7 +991,7 @@ export function ImportMigrationPanel({
               </button>
               <button
                 type="button"
-                disabled={saving}
+                disabled={saving || clearingImported}
                 onClick={handleCommitImport}
                 className="flex h-9 items-center gap-1.5 rounded-lg bg-[#4CAF50] px-4 text-xs font-bold text-white hover:bg-[#43A047] disabled:bg-slate-300"
               >
@@ -836,7 +999,11 @@ export function ImportMigrationPanel({
                 <span>
                   {saving
                     ? 'Menyinkronkan...'
-                    : `Sinkronkan ${previewStats.uniqueSkus} Produk ke Firebase`}
+                    : `Sinkronkan ${previewStats.uniqueSkus} Produk${
+                        previewStats.uniqueTxCount > 0
+                          ? ` & ${previewStats.uniqueTxCount} TRX`
+                          : ''
+                      } ke Firebase`}
                 </span>
               </button>
             </div>
@@ -847,6 +1014,9 @@ export function ImportMigrationPanel({
               <thead className="sticky top-0 border-b border-slate-200 bg-white text-[11px] text-slate-500">
                 <tr>
                   <th className="px-3 py-2 font-semibold">#</th>
+                  {previewStats.hasTxCodes && (
+                    <th className="px-3 py-2 font-semibold">Kode Trx</th>
+                  )}
                   <th className="px-3 py-2 font-semibold">Kode Item</th>
                   <th className="px-3 py-2 font-semibold">Nama Produk</th>
                   <th className="px-3 py-2 font-semibold">Kategori</th>
@@ -867,12 +1037,17 @@ export function ImportMigrationPanel({
               <tbody className="divide-y divide-slate-100">
                 {visiblePreviewRows.map((row, idx) => (
                   <tr
-                    key={`${row.branchName}-${row.sku}-${row.saleYear ?? ''}-${row.saleMonth ?? ''}-${idx}`}
+                    key={`${row.branchName}-${row.transactionCode ?? ''}-${row.sku}-${row.saleYear ?? ''}-${row.saleMonth ?? ''}-${idx}`}
                     className="hover:bg-slate-50"
                   >
                     <td className="font-mono-num px-3 py-2 text-slate-400">
                       {idx + 1}
                     </td>
+                    {previewStats.hasTxCodes && (
+                      <td className="font-mono-num px-3 py-2 text-slate-600 whitespace-nowrap">
+                        {row.transactionCode || '—'}
+                      </td>
+                    )}
                     <td className="font-mono-num px-3 py-2 text-slate-600">
                       {row.sku}
                     </td>

@@ -3,13 +3,29 @@ import { ImportedCatalogRow } from '../types/pos';
 
 export type SheetTabKind = 'catalog' | 'sales' | 'dashboard' | 'unknown';
 
+export interface DetectedColumnMap {
+  txId?: string;
+  sku?: string;
+  name?: string;
+  category?: string;
+  branch?: string;
+  price?: string;
+  initialStock?: string;
+  currentStock?: string;
+  qtySold?: string;
+  totalSales?: string;
+  date?: string;
+}
+
 export interface ParsedSheetTab {
   sheetName: string;
   kind: SheetTabKind;
   rows: ImportedCatalogRow[];
   rawRowCount: number;
+  uniqueTxCount: number;
   detectedBranch: string;
   detectedMonth: number;
+  detectedColumns: DetectedColumnMap;
   selectedByDefault: boolean;
 }
 
@@ -223,8 +239,9 @@ function normalizeHeader(cell: unknown): string {
   return String(cell ?? '')
     .trim()
     .toLowerCase()
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ');
+    .replace(/[_.\-/]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function findColIndex(
@@ -434,13 +451,83 @@ export function parseSpreadsheetMatrix(
       kind: isDashboard ? 'dashboard' : 'unknown',
       rows: [],
       rawRowCount: 0,
+      uniqueTxCount: 0,
       detectedBranch,
       detectedMonth,
+      detectedColumns: {},
       selectedByDefault: false,
     };
   }
 
-  const headers = (matrix[headerRowIdx] ?? []).map(normalizeHeader);
+  const rawHeaders = (matrix[headerRowIdx] ?? []).map((c) =>
+    String(c ?? '').trim()
+  );
+  const headers = rawHeaders.map(normalizeHeader);
+
+  const idxTxId = findColIndex(
+    headers,
+    [
+      'id transaksi',
+      'kode transaksi',
+      'no transaksi',
+      'nomor transaksi',
+      'no invoice',
+      'nomor invoice',
+      'kode invoice',
+      'invoice',
+      'no struk',
+      'kode struk',
+      'id struk',
+      'no nota',
+      'kode nota',
+      'id nota',
+      'nota',
+      'struk',
+      'trx id',
+      'no trx',
+      'id trx',
+      'kode trx',
+      'trx',
+      'transaction id',
+      'order id',
+      'id order',
+      'no order',
+      'kode order',
+      'receipt',
+      'no faktur',
+      'faktur',
+      'no ref',
+      'referensi',
+      'id penjualan',
+      'kode penjualan',
+      'transaksi',
+      'id',
+    ],
+    [
+      'tanggal',
+      'tgl',
+      'date',
+      'waktu',
+      'status',
+      'metode',
+      'tipe',
+      'type',
+      'jenis',
+      'produk',
+      'barang',
+      'item',
+      'cabang',
+      'kasir',
+      'sku',
+      'total',
+      'nilai',
+      'jumlah',
+      'diskon',
+      'discount',
+      'bayar',
+    ]
+  );
+
   const idxSku = findColIndex(
     headers,
     [
@@ -467,6 +554,8 @@ export function parseSpreadsheetMatrix(
       'kode voucher',
       'kode promo',
       'kode kasir',
+      'kode order',
+      'kode penjualan',
       'barcode',
     ]
   );
@@ -495,19 +584,44 @@ export function parseSpreadsheetMatrix(
       'nama pelanggan',
       'nama toko',
       'kode item',
+      'id item',
     ]
   );
-  const idxCategory = findColIndex(headers, [
-    'kategori',
-    'category',
-    'jenis',
-    'sub kategori',
-    'grup',
-    'group',
-    'divisi',
-    'tipe',
-    'type',
-  ]);
+  // CRITICAL: Never match "Tipe Diskon" / "Jenis Diskon" / "Tipe Pembayaran" as product category!
+  const idxCategory = findColIndex(
+    headers,
+    [
+      'kategori produk',
+      'kategori barang',
+      'kategori',
+      'category',
+      'sub kategori',
+      'divisi',
+      'grup',
+      'group',
+      'jenis produk',
+      'jenis barang',
+    ],
+    [
+      'diskon',
+      'discount',
+      'potongan',
+      'pembayaran',
+      'payment',
+      'transaksi',
+      'metode',
+      'bayar',
+      'harga',
+      'stok',
+      'cabang',
+      'outlet',
+      'status',
+      'promo',
+      'voucher',
+      'tipe',
+      'type',
+    ]
+  );
   const idxPrice = findColIndex(
     headers,
     [
@@ -521,7 +635,7 @@ export function parseSpreadsheetMatrix(
       'hj',
       'tarif',
     ],
-    ['total harga', 'harga total', 'harga beli', 'harga modal', 'hpp']
+    ['total harga', 'harga total', 'harga beli', 'harga modal', 'hpp', 'diskon', 'discount']
   );
   const idxInitialStock = findColIndex(headers, [
     'stok awal',
@@ -551,6 +665,7 @@ export function parseSpreadsheetMatrix(
     ],
     ['stok awal', 'stock awal', 'status', 'restok', '%', 'terjual', 'keluar', 'masuk']
   );
+  // CRITICAL: Exclude discount/payment columns (e.g. "Jumlah Diskon", "Nilai Diskon", "Diskon (%)") from Qty!
   const idxQtySold = findColIndex(
     headers,
     [
@@ -561,6 +676,9 @@ export function parseSpreadsheetMatrix(
       'kuantitas',
       'quantity',
       'qty',
+      'jumlah barang',
+      'jumlah item',
+      'jumlah produk',
       'jumlah',
       'sold',
       'pcs',
@@ -569,7 +687,24 @@ export function parseSpreadsheetMatrix(
       'qty keluar',
       'keluar',
     ],
-    ['qty awal', 'qty akhir', 'qty stok', '%', 'total qty', 'jumlah stok']
+    [
+      'qty awal',
+      'qty akhir',
+      'qty stok',
+      '%',
+      'persen',
+      'total qty',
+      'jumlah stok',
+      'diskon',
+      'discount',
+      'potongan',
+      'bayar',
+      'harga',
+      'uang',
+      'kembali',
+      'kembalian',
+      'voucher',
+    ]
   );
   const idxTotalSales = findColIndex(
     headers,
@@ -581,6 +716,7 @@ export function parseSpreadsheetMatrix(
       'harga total',
       'grand total',
       'total bayar',
+      'total bersih',
       'omset',
       'pendapatan',
       'penjualan',
@@ -592,7 +728,17 @@ export function parseSpreadsheetMatrix(
       'nilai',
       'amount',
     ],
-    ['total stok', 'total qty', 'total item', 'total produk']
+    [
+      'total stok',
+      'total qty',
+      'total item',
+      'total produk',
+      'diskon',
+      'discount',
+      'potongan',
+      'kembalian',
+      'kembali',
+    ]
   );
   const idxBranch = findColIndex(headers, [
     'cabang',
@@ -617,6 +763,20 @@ export function parseSpreadsheetMatrix(
     'timestamp',
   ]);
 
+  const detectedColumns: DetectedColumnMap = {
+    txId: idxTxId >= 0 ? rawHeaders[idxTxId] : undefined,
+    sku: idxSku >= 0 ? rawHeaders[idxSku] : undefined,
+    name: idxName >= 0 ? rawHeaders[idxName] : undefined,
+    category: idxCategory >= 0 ? rawHeaders[idxCategory] : undefined,
+    branch: idxBranch >= 0 ? rawHeaders[idxBranch] : undefined,
+    price: idxPrice >= 0 ? rawHeaders[idxPrice] : undefined,
+    initialStock: idxInitialStock >= 0 ? rawHeaders[idxInitialStock] : undefined,
+    currentStock: idxCurrentStock >= 0 ? rawHeaders[idxCurrentStock] : undefined,
+    qtySold: idxQtySold >= 0 ? rawHeaders[idxQtySold] : undefined,
+    totalSales: idxTotalSales >= 0 ? rawHeaders[idxTotalSales] : undefined,
+    date: idxDate >= 0 ? rawHeaders[idxDate] : undefined,
+  };
+
   const isSalesSheet =
     !isDashboard &&
     (sheetLower.includes('transaksi') ||
@@ -632,6 +792,7 @@ export function parseSpreadsheetMatrix(
       : 'catalog';
 
   const parsedMap = new Map<string, ImportedCatalogRow>();
+  const uniqueTxSet = new Set<string>();
   let rawRowCount = 0;
 
   for (let r = headerRowIdx + 1; r < matrix.length; r++) {
@@ -639,6 +800,7 @@ export function parseSpreadsheetMatrix(
     const rawName = idxName >= 0 ? String(row[idxName] ?? '').trim() : '';
     const rawSku = idxSku >= 0 ? cellToSkuString(row[idxSku]) : '';
     const rawBarcode = idxBarcode >= 0 ? cellToSkuString(row[idxBarcode]) : '';
+    const rawTxId = idxTxId >= 0 ? cellToSkuString(row[idxTxId]) : '';
 
     if (!rawName && !rawSku && !rawBarcode) continue;
     if (
@@ -654,11 +816,12 @@ export function parseSpreadsheetMatrix(
     }
 
     const baseSku = rawSku || rawBarcode || slugSkuFromName(rawName, r);
-    const cleanSku = baseSku
-      .replace(/[^a-zA-Z0-9_-]/g, '-')
-      .replace(/-+/g, '-')
-      .replace(/^-|-$/g, '')
-      .slice(0, 32) || `SKU-${r}`;
+    const cleanSku =
+      baseSku
+        .replace(/[^a-zA-Z0-9_-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 32) || `SKU-${r}`;
 
     const cleanBarcode =
       (rawBarcode || cleanSku)
@@ -668,8 +831,26 @@ export function parseSpreadsheetMatrix(
         .slice(0, 64) || cleanSku;
 
     const cleanName = (rawName || cleanSku).slice(0, 100);
+    const rawCategory =
+      idxCategory >= 0 ? String(row[idxCategory] ?? '').trim() : '';
+    const pollutedCategory = new Set([
+      'persen',
+      'tidak_ada',
+      'tidak ada',
+      'nominal',
+      'fixed',
+      'percent',
+      'none',
+      'cash',
+      'tunai',
+      'qris',
+      'transfer',
+    ]);
     const category =
-      (idxCategory >= 0 ? String(row[idxCategory] ?? '').trim() : '') || 'Umum';
+      rawCategory && !pollutedCategory.has(rawCategory.toLowerCase())
+        ? rawCategory
+        : 'Umum';
+
     let qtySold =
       idxQtySold >= 0 ? parseRupiahOrNumber(row[idxQtySold]) : 0;
     let totalSales =
@@ -717,11 +898,28 @@ export function parseSpreadsheetMatrix(
       if (parsedYr >= 2000 && parsedYr <= 2100) saleYear = parsedYr;
     }
 
+    // Build clean transactionCode for Data_Penjualan so Total Transaksi reflects REAL TRX count!
+    let transactionCode: string | undefined;
+    if (isSalesSheet) {
+      const cleanedRawTx = rawTxId
+        .replace(/[^a-zA-Z0-9_-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 32);
+      if (cleanedRawTx.length >= 1) {
+        transactionCode =
+          cleanedRawTx.length >= 3 ? cleanedRawTx : `TRX-${cleanedRawTx}`;
+      } else {
+        transactionCode = `TRX-${saleYear}${String(saleMonth).padStart(2, '0')}-${r}`;
+      }
+      uniqueTxSet.add(`${branchName.toLowerCase()}::${transactionCode.toLowerCase()}`);
+    }
+
     rawRowCount += 1;
 
-    // Group by (branch, sku, year, month) so transaction logs aggregate qty & sales instead of overwriting!
+    // For Data_Penjualan, preserve per-transaction rows keyed by (branch, transactionCode, sku)!
     const dedupeKey = isSalesSheet
-      ? `${branchName.toLowerCase()}::${cleanSku.toLowerCase()}::${saleYear}::${saleMonth}`
+      ? `${branchName.toLowerCase()}::${(transactionCode ?? '').toLowerCase()}::${cleanSku.toLowerCase()}`
       : `${branchName.toLowerCase()}::${cleanSku.toLowerCase()}`;
 
     const prev = parsedMap.get(dedupeKey);
@@ -731,7 +929,8 @@ export function parseSpreadsheetMatrix(
       parsedMap.set(dedupeKey, {
         ...prev,
         name: prev.name || cleanName,
-        category: prev.category !== 'Umum' ? prev.category : category.slice(0, 50),
+        category:
+          prev.category !== 'Umum' ? prev.category : category.slice(0, 50),
         price: prev.price > 0 ? prev.price : price,
         qtySold: nextQty > 0 ? nextQty : undefined,
         totalSales: nextQty > 0 ? nextSales : undefined,
@@ -746,13 +945,9 @@ export function parseSpreadsheetMatrix(
         currentStock: hasCurrentStockCol ? currentStock : prev.currentStock,
         hasStockData: prev.hasStockData || hasStockData,
         qtySold:
-          qtySold > 0
-            ? (prev.qtySold ?? 0) + qtySold
-            : prev.qtySold,
+          qtySold > 0 ? (prev.qtySold ?? 0) + qtySold : prev.qtySold,
         totalSales:
-          qtySold > 0
-            ? (prev.totalSales ?? 0) + totalSales
-            : prev.totalSales,
+          qtySold > 0 ? (prev.totalSales ?? 0) + totalSales : prev.totalSales,
       });
     } else {
       parsedMap.set(dedupeKey, {
@@ -765,6 +960,7 @@ export function parseSpreadsheetMatrix(
         initialStock,
         currentStock,
         hasStockData,
+        transactionCode,
         qtySold: qtySold > 0 ? qtySold : undefined,
         totalSales: qtySold > 0 ? totalSales : undefined,
         saleMonth,
@@ -778,8 +974,10 @@ export function parseSpreadsheetMatrix(
     kind,
     rows: Array.from(parsedMap.values()),
     rawRowCount,
+    uniqueTxCount: uniqueTxSet.size,
     detectedBranch,
     detectedMonth,
+    detectedColumns,
     selectedByDefault: !isDashboard && parsedMap.size > 0,
   };
 }
@@ -863,12 +1061,9 @@ export function mergeSelectedTabs(
       const yr = r.saleYear ?? new Date().getFullYear();
       const mo = r.saleMonth ?? new Date().getMonth() + 1;
 
-      const baseKey = `${bKey}::${skuKey}`;
-      const periodKey = `${baseKey}::${yr}::${mo}`;
+      const baseKey = `cat::${bKey}::${skuKey}`;
 
-      // When a dedicated sales tab (Data_Penjualan) is selected alongside monitoring_stok,
-      // monitoring_stok provides authoritative catalog+stock (without double-counting its summary qtySold),
-      // and Data_Penjualan provides authoritative per-month sales!
+      // Catalog tab (monitoring_stok) -> authoritative catalog + stock rows
       if (!isSalesOnly && hasDedicatedSalesTab) {
         const prev = merged.get(baseKey);
         if (prev) {
@@ -899,57 +1094,39 @@ export function mergeSelectedTabs(
         continue;
       }
 
-      const existingBase = merged.get(baseKey);
-      if (isSalesOnly && existingBase) {
-        if (
-          !existingBase.qtySold ||
-          (existingBase.saleYear === yr && existingBase.saleMonth === mo)
-        ) {
-          merged.set(baseKey, {
-            ...existingBase,
-            price:
-              existingBase.price > 0
-                ? existingBase.price
-                : r.price || master?.price || 0,
-            qtySold: (existingBase.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
+      // Sales tab (Data_Penjualan) -> preserve EVERY individual transactionCode so Total Transaksi is exact!
+      if (isSalesOnly) {
+        const txPart = (r.transactionCode ?? `${yr}-${mo}`).toLowerCase();
+        const txLineKey = `tx::${bKey}::${txPart}::${skuKey}`;
+        const prev = merged.get(txLineKey);
+        if (prev) {
+          merged.set(txLineKey, {
+            ...prev,
+            qtySold: (prev.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
             totalSales:
-              (existingBase.totalSales ?? 0) + (r.totalSales ?? 0) || undefined,
-            saleYear: yr,
-            saleMonth: mo,
-          });
-          continue;
-        }
-        // Different month for the same branch+sku -> store separate period row preserving stock
-        const existingPeriod = merged.get(periodKey);
-        if (existingPeriod) {
-          merged.set(periodKey, {
-            ...existingPeriod,
-            qtySold:
-              (existingPeriod.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
-            totalSales:
-              (existingPeriod.totalSales ?? 0) + (r.totalSales ?? 0) ||
-              undefined,
+              (prev.totalSales ?? 0) + (r.totalSales ?? 0) || undefined,
           });
         } else {
-          merged.set(periodKey, {
+          merged.set(txLineKey, {
             ...r,
             sku: resolvedSku,
             name: master?.name || r.name,
             barcode: master?.barcode || r.barcode,
-            category: master?.category || r.category,
+            category:
+              master && master.category !== 'Umum'
+                ? master.category
+                : r.category,
             price: r.price > 0 ? r.price : master?.price || 0,
-            initialStock: existingBase.initialStock,
-            currentStock: existingBase.currentStock,
-            hasStockData: existingBase.hasStockData,
+            hasStockData: false,
           });
         }
         continue;
       }
 
-      const key = isSalesOnly ? periodKey : baseKey;
-      const prev = merged.get(key);
+      // Single non-sales tab or multiple catalog tabs without dedicated sales tab
+      const prev = merged.get(baseKey);
       if (prev) {
-        merged.set(key, {
+        merged.set(baseKey, {
           ...prev,
           name: prev.name || r.name,
           category: prev.category !== 'Umum' ? prev.category : r.category,
@@ -962,7 +1139,7 @@ export function mergeSelectedTabs(
             (prev.totalSales ?? 0) + (r.totalSales ?? 0) || undefined,
         });
       } else {
-        merged.set(key, {
+        merged.set(baseKey, {
           ...r,
           sku: resolvedSku,
           name: master?.name || r.name,
