@@ -40,6 +40,11 @@ import {
   UserProfile,
   VoucherDef,
 } from '../types/pos';
+import {
+  inferCategoryFromProductName,
+  normalizeBranchKey,
+  normalizeBranchName,
+} from '../utils/productCategory';
 
 // Validation constants synchronized verbatim with firebase-blueprint.json
 const ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -83,26 +88,9 @@ function sanitizeUpperCode(raw: string, maxLen: number, fallback: string): strin
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
-const POLLUTED_CATEGORIES = new Set([
-  'persen',
-  'tidak_ada',
-  'tidak ada',
-  'nominal',
-  'fixed',
-  'percent',
-  'none',
-  'cash',
-  'tunai',
-  'qris',
-  'transfer',
-]);
-
-function sanitizeCategory(raw: string): string {
-  const cleaned = raw.trim().slice(0, CATEGORY_MAX);
-  if (!cleaned || POLLUTED_CATEGORIES.has(cleaned.toLowerCase())) {
-    return 'Umum';
-  }
-  return cleaned;
+function sanitizeCategory(raw: string, productName?: string): string {
+  const inferred = inferCategoryFromProductName(productName ?? '', raw);
+  return inferred.trim().slice(0, CATEGORY_MAX) || 'Umum';
 }
 
 function sanitizeInvoiceNo(raw: string, fallback: string): string {
@@ -441,14 +429,15 @@ export function subscribeProducts(
     (snapshot) => {
       const list: Product[] = snapshot.docs.map((d) => {
         const data = d.data();
+        const nameStr = String(data.name ?? '');
         return {
           id: d.id,
           sku: String(data.sku ?? ''),
           barcode: String(data.barcode ?? ''),
-          name: String(data.name ?? ''),
+          name: nameStr,
           price: Number(data.price ?? 0),
           image: String(data.image ?? ''),
-          category: sanitizeCategory(String(data.category ?? 'Umum')),
+          category: sanitizeCategory(String(data.category ?? 'Umum'), nameStr),
         };
       });
       list.sort((a, b) => a.name.localeCompare(b.name));
@@ -565,7 +554,10 @@ export function subscribeSalesLines(
           productId: String(data.productId ?? ''),
           productSku: String(data.productSku ?? ''),
           productName: String(data.productName ?? ''),
-          category: sanitizeCategory(String(data.category ?? 'Umum')),
+          category: sanitizeCategory(
+            String(data.category ?? 'Umum'),
+            String(data.productName ?? '')
+          ),
           qty: Number(data.qty ?? 0),
           unitPrice: Number(data.unitPrice ?? 0),
           lineTotal: Number(data.lineTotal ?? 0),
@@ -859,7 +851,7 @@ export async function saveProductToFirestore(
   const name = input.name.trim().slice(0, NAME_MAX);
   const price = Math.min(1000000000, Math.max(0, Math.round(input.price)));
   const image = input.image.trim().slice(0, IMAGE_MAX);
-  const category = sanitizeCategory(input.category);
+  const category = sanitizeCategory(input.category, name);
 
   if (!name) throw new Error('Nama produk tidak boleh kosong.');
 
@@ -948,6 +940,47 @@ export async function saveProductToFirestore(
     return newId;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function autoCategorizeProductsInFirestore(
+  ownerId: string,
+  products: Product[]
+): Promise<{ updatedCount: number }> {
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'products'), where('ownerId', '==', ownerId))
+    );
+    const updates: Array<{ id: string; category: string }> = [];
+    snap.docs.forEach((d) => {
+      const data = d.data();
+      const rawCat = String(data.category ?? '').trim();
+      const prodName = String(data.name ?? '').trim();
+      const inferred = sanitizeCategory(rawCat, prodName);
+      if (inferred !== rawCat && inferred !== 'Umum') {
+        updates.push({ id: d.id, category: inferred });
+      }
+    });
+
+    if (updates.length === 0 && products.length >= 0) {
+      return { updatedCount: 0 };
+    }
+
+    for (let i = 0; i < updates.length; i += 150) {
+      const chunk = updates.slice(i, i + 150);
+      const batch = writeBatch(db);
+      chunk.forEach((u) => {
+        batch.update(doc(db, 'products', u.id), {
+          category: u.category,
+          updatedAt: serverTimestamp(),
+        });
+      });
+      await batch.commit();
+    }
+
+    return { updatedCount: updates.length };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, 'products');
   }
 }
 
@@ -1707,7 +1740,7 @@ export async function importCatalogRowsToFirestore(
         address: String(data.address ?? ''),
         active: Boolean(data.active ?? true),
       };
-      branchByName.set(b.name.trim().toLowerCase(), b);
+      branchByName.set(normalizeBranchKey(b.name), b);
       branchIds.add(d.id);
     });
 
@@ -1715,14 +1748,15 @@ export async function importCatalogRowsToFirestore(
     const productById = new Map<string, Product>();
     liveProductsSnap.docs.forEach((d) => {
       const data = d.data();
+      const prodName = String(data.name ?? '');
       const p: Product = {
         id: d.id,
         sku: String(data.sku ?? ''),
         barcode: String(data.barcode ?? ''),
-        name: String(data.name ?? ''),
+        name: prodName,
         price: Number(data.price ?? 0),
         image: String(data.image ?? ''),
-        category: sanitizeCategory(String(data.category ?? 'Umum')),
+        category: sanitizeCategory(String(data.category ?? 'Umum'), prodName),
       };
       productById.set(d.id, p);
       if (p.sku) {
@@ -1746,18 +1780,22 @@ export async function importCatalogRowsToFirestore(
       });
     });
 
-    // PASS 1A: Create any missing branches (chunked by 150)
-    const uniqueBranchNames = Array.from(
-      new Set(
-        rows.map((r) =>
-          (r.branchName.trim() || DEFAULT_BRANCH.name).slice(0, BRANCH_NAME_MAX)
-        )
-      )
-    );
+    // PASS 1A: Create any missing branches (chunked by 150) — normalize underscores so CFD_Senayan == CFD Senayan
+    const uniqueBranchMap = new Map<string, string>();
+    rows.forEach((r) => {
+      const normalized = normalizeBranchName(r.branchName, DEFAULT_BRANCH.name).slice(
+        0,
+        BRANCH_NAME_MAX
+      );
+      const key = normalizeBranchKey(normalized);
+      if (key && !uniqueBranchMap.has(key)) {
+        uniqueBranchMap.set(key, normalized);
+      }
+    });
 
-    const missingBranches = uniqueBranchNames.filter(
-      (name) => !branchByName.has(name.toLowerCase())
-    );
+    const missingBranches = Array.from(uniqueBranchMap.entries())
+      .filter(([key]) => !branchByName.has(key))
+      .map(([, name]) => name);
 
     if (missingBranches.length > 0) {
       report('Membuat cabang baru...', 0, missingBranches.length);
@@ -1787,7 +1825,7 @@ export async function importCatalogRowsToFirestore(
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
-          branchByName.set(bName.toLowerCase(), {
+          branchByName.set(normalizeBranchKey(bName), {
             id: bId,
             ownerId,
             code: bCode,
@@ -1827,7 +1865,7 @@ export async function importCatalogRowsToFirestore(
         cleanSku
       );
       const cleanName = r.name.trim().slice(0, NAME_MAX) || cleanSku;
-      const cleanCategory = sanitizeCategory(r.category);
+      const cleanCategory = sanitizeCategory(r.category, cleanName);
       const cleanPrice = Math.min(
         1000000000,
         Math.max(0, Math.round(r.price))
@@ -1872,7 +1910,10 @@ export async function importCatalogRowsToFirestore(
         if (existing) {
           const finalPrice =
             entry.cleanPrice > 0 ? entry.cleanPrice : existing.price;
-          const existingCleanCat = sanitizeCategory(existing.category);
+          const existingCleanCat = sanitizeCategory(
+            existing.category,
+            entry.cleanName || existing.name
+          );
           const finalCategory =
             entry.cleanCategory !== 'Umum'
               ? entry.cleanCategory
@@ -1948,12 +1989,12 @@ export async function importCatalogRowsToFirestore(
 
     const stockTaskMap = new Map<string, StockTask>();
     rows.forEach((row, idx) => {
-      const bName = (row.branchName.trim() || DEFAULT_BRANCH.name).slice(
+      const bName = normalizeBranchName(row.branchName, DEFAULT_BRANCH.name).slice(
         0,
         BRANCH_NAME_MAX
       );
       const cleanSku = sanitizeCode(row.sku, SKU_MAX, `SKU-${idx + 1}`);
-      const branch = branchByName.get(bName.toLowerCase());
+      const branch = branchByName.get(normalizeBranchKey(bName));
       const product = productBySku.get(cleanSku.toLowerCase());
       if (!branch || !product) return;
 
@@ -2125,11 +2166,11 @@ export async function importCatalogRowsToFirestore(
 
         const txGroups = new Map<string, PendingTxGroup>();
         rawSalesRows.forEach((sr, idx) => {
-          const bName = (sr.branchName.trim() || DEFAULT_BRANCH.name).slice(
+          const bName = normalizeBranchName(sr.branchName, DEFAULT_BRANCH.name).slice(
             0,
             BRANCH_NAME_MAX
           );
-          const branch = branchByName.get(bName.toLowerCase());
+          const branch = branchByName.get(normalizeBranchKey(bName));
           const cleanSku = sanitizeCode(sr.sku, SKU_MAX, `SKU-${idx + 1}`);
           const product = productBySku.get(cleanSku.toLowerCase());
           if (!branch || !product) return;
@@ -2392,11 +2433,11 @@ export async function importCatalogRowsToFirestore(
 
         const incomingAgg = new Map<string, AggSalesEntry>();
         rawSalesRows.forEach((sr, idx) => {
-          const bName = (sr.branchName.trim() || DEFAULT_BRANCH.name).slice(
+          const bName = normalizeBranchName(sr.branchName, DEFAULT_BRANCH.name).slice(
             0,
             BRANCH_NAME_MAX
           );
-          const branch = branchByName.get(bName.toLowerCase());
+          const branch = branchByName.get(normalizeBranchKey(bName));
           const cleanSku = sanitizeCode(sr.sku, SKU_MAX, `SKU-${idx + 1}`);
           const product = productBySku.get(cleanSku.toLowerCase());
           if (!branch || !product) return;

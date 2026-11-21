@@ -10,13 +10,20 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { Branch, BranchStock, Product, StockLog } from '../types/pos';
+import {
+  Branch,
+  BranchStock,
+  Product,
+  SalesLine,
+  StockLog,
+} from '../types/pos';
 import { formatDateTime, formatNumber, formatRupiah } from '../utils/format';
 
 interface InventoryBranchPanelProps {
   branches: Branch[];
   products: Product[];
   branchStocks: BranchStock[];
+  salesLines: SalesLine[];
   stockLogs: StockLog[];
   activeBranchId: string | null;
   onSelectActiveBranch: (branchId: string) => void;
@@ -45,6 +52,7 @@ export function InventoryBranchPanel({
   branches,
   products,
   branchStocks,
+  salesLines,
   stockLogs,
   activeBranchId,
   onSelectActiveBranch,
@@ -106,6 +114,23 @@ export function InventoryBranchPanel({
     return map;
   }, [branchStocks, selectedBranch]);
 
+  const soldByProductForBranch = useMemo(() => {
+    const byId = new Map<string, number>();
+    const bySku = new Map<string, number>();
+    if (!selectedBranch) return { byId, bySku };
+    for (const line of salesLines) {
+      if (line.branchId !== selectedBranch.id) continue;
+      if (line.productId) {
+        byId.set(line.productId, (byId.get(line.productId) ?? 0) + line.qty);
+      }
+      if (line.productSku) {
+        const skuKey = line.productSku.trim().toLowerCase();
+        bySku.set(skuKey, (bySku.get(skuKey) ?? 0) + line.qty);
+      }
+    }
+    return { byId, bySku };
+  }, [salesLines, selectedBranch]);
+
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return products
@@ -114,10 +139,15 @@ export function InventoryBranchPanel({
         const currentStock = st?.currentStock ?? 0;
         const initialStock = st?.initialStock ?? 0;
         const minThreshold = st?.minThreshold ?? 2;
+        const soldQty =
+          soldByProductForBranch.byId.get(p.id) ??
+          soldByProductForBranch.bySku.get(p.sku.trim().toLowerCase()) ??
+          0;
         return {
           product: p,
           currentStock,
           initialStock,
+          soldQty,
           minThreshold,
         };
       })
@@ -141,10 +171,11 @@ export function InventoryBranchPanel({
         }
         return true;
       });
-  }, [products, stockMapForBranch, search, stockFilter]);
+  }, [products, stockMapForBranch, soldByProductForBranch, search, stockFilter]);
 
   const summary = useMemo(() => {
     let totalUnits = 0;
+    let totalSoldUnits = 0;
     let zeroCount = 0;
     let lowCount = 0;
     for (const p of products) {
@@ -152,11 +183,15 @@ export function InventoryBranchPanel({
       const curr = st?.currentStock ?? 0;
       const min = st?.minThreshold ?? 2;
       totalUnits += curr;
+      totalSoldUnits +=
+        soldByProductForBranch.byId.get(p.id) ??
+        soldByProductForBranch.bySku.get(p.sku.trim().toLowerCase()) ??
+        0;
       if (curr <= 0) zeroCount += 1;
       else if (curr <= min) lowCount += 1;
     }
-    return { totalUnits, zeroCount, lowCount };
-  }, [products, stockMapForBranch]);
+    return { totalUnits, totalSoldUnits, zeroCount, lowCount };
+  }, [products, stockMapForBranch, soldByProductForBranch]);
 
   const branchLogs = useMemo(() => {
     if (!selectedBranch) return stockLogs.slice(0, 20);
@@ -448,9 +483,22 @@ export function InventoryBranchPanel({
               ))}
             </select>
             <span className="text-xs text-slate-500">
-              Total Sisa: <strong className="font-mono-num text-slate-900">{formatNumber(summary.totalUnits)} pcs</strong> ·{' '}
-              <span className="text-rose-600 font-semibold">{summary.zeroCount} Habis</span> ·{' '}
-              <span className="text-amber-600 font-semibold">{summary.lowCount} Menipis</span>
+              Total Sisa:{' '}
+              <strong className="font-mono-num text-slate-900">
+                {formatNumber(summary.totalUnits)} pcs
+              </strong>{' '}
+              · Total Terjual:{' '}
+              <strong className="font-mono-num text-[#1B8EE6]">
+                {formatNumber(summary.totalSoldUnits)} pcs
+              </strong>{' '}
+              ·{' '}
+              <span className="font-semibold text-rose-600">
+                {summary.zeroCount} Habis
+              </span>{' '}
+              ·{' '}
+              <span className="font-semibold text-amber-600">
+                {summary.lowCount} Menipis
+              </span>
             </span>
           </div>
 
@@ -502,6 +550,9 @@ export function InventoryBranchPanel({
                   Stok Awal
                 </th>
                 <th className="px-3 py-2.5 text-right font-semibold">
+                  Terjual
+                </th>
+                <th className="px-3 py-2.5 text-right font-semibold">
                   Sisa Stok
                 </th>
                 <th className="px-3 py-2.5 font-semibold">Status</th>
@@ -514,60 +565,76 @@ export function InventoryBranchPanel({
               {rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={8}
                     className="px-4 py-8 text-center text-slate-400"
                   >
                     Tidak ada produk yang cocok dengan filter stok ini.
                   </td>
                 </tr>
               ) : (
-                rows.map(({ product, currentStock, initialStock, minThreshold }) => {
-                  const statusText =
-                    currentStock <= 0
-                      ? 'Habis (Tidak bisa dijual)'
-                      : currentStock <= minThreshold
-                        ? 'Stok Menipis'
-                        : 'Stok Aman';
-                  const statusClass =
-                    currentStock <= 0
-                      ? 'text-rose-600 font-bold'
-                      : currentStock <= minThreshold
-                        ? 'text-amber-600 font-semibold'
-                        : 'text-emerald-700 font-semibold';
+                rows.map(
+                  ({
+                    product,
+                    currentStock,
+                    initialStock,
+                    soldQty,
+                    minThreshold,
+                  }) => {
+                    const statusText =
+                      currentStock <= 0
+                        ? 'Habis (Tidak bisa dijual)'
+                        : currentStock <= minThreshold
+                          ? 'Stok Menipis'
+                          : 'Stok Aman';
+                    const statusClass =
+                      currentStock <= 0
+                        ? 'text-rose-600 font-bold'
+                        : currentStock <= minThreshold
+                          ? 'text-amber-600 font-semibold'
+                          : 'text-emerald-700 font-semibold';
 
-                  return (
-                    <tr key={product.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-2.5">
-                        <div className="font-semibold text-slate-900">
-                          {product.name}
-                        </div>
-                        <div className="font-mono-num text-[11px] text-slate-400">
-                          {product.sku}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2.5 text-slate-600">
-                        {product.category}
-                      </td>
-                      <td className="font-mono-num px-3 py-2.5 text-right text-slate-700 whitespace-nowrap">
-                        {formatRupiah(product.price)}
-                      </td>
-                      <td className="font-mono-num px-3 py-2.5 text-right text-slate-600 whitespace-nowrap">
-                        {initialStock} pcs
-                      </td>
-                      <td
-                        className={`font-mono-num px-3 py-2.5 text-right font-bold whitespace-nowrap ${
-                          currentStock <= 0
-                            ? 'text-rose-600'
-                            : currentStock <= minThreshold
-                              ? 'text-amber-600'
-                              : 'text-slate-900'
-                        }`}
-                      >
-                        {currentStock} pcs
-                      </td>
-                      <td className={`px-3 py-2.5 text-[11px] ${statusClass}`}>
-                        {statusText}
-                      </td>
+                    return (
+                      <tr key={product.id} className="hover:bg-slate-50">
+                        <td className="px-4 py-2.5">
+                          <div className="font-semibold text-slate-900">
+                            {product.name}
+                          </div>
+                          <div className="font-mono-num text-[11px] text-slate-400">
+                            {product.sku}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5 text-slate-600">
+                          {product.category}
+                        </td>
+                        <td className="font-mono-num px-3 py-2.5 text-right text-slate-700 whitespace-nowrap">
+                          {formatRupiah(product.price)}
+                        </td>
+                        <td className="font-mono-num px-3 py-2.5 text-right text-slate-600 whitespace-nowrap">
+                          {initialStock} pcs
+                        </td>
+                        <td
+                          className={`font-mono-num px-3 py-2.5 text-right whitespace-nowrap ${
+                            soldQty > 0
+                              ? 'font-semibold text-[#1B8EE6]'
+                              : 'text-slate-400'
+                          }`}
+                        >
+                          {soldQty > 0 ? `${soldQty} pcs` : '0 pcs'}
+                        </td>
+                        <td
+                          className={`font-mono-num px-3 py-2.5 text-right font-bold whitespace-nowrap ${
+                            currentStock <= 0
+                              ? 'text-rose-600'
+                              : currentStock <= minThreshold
+                                ? 'text-amber-600'
+                                : 'text-slate-900'
+                          }`}
+                        >
+                          {currentStock} pcs
+                        </td>
+                        <td className={`px-3 py-2.5 text-[11px] ${statusClass}`}>
+                          {statusText}
+                        </td>
                       <td className="px-4 py-2.5 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
                           <button
@@ -588,9 +655,10 @@ export function InventoryBranchPanel({
                           </button>
                         </div>
                       </td>
-                    </tr>
-                  );
-                })
+                      </tr>
+                    );
+                  }
+                )
               )}
             </tbody>
           </table>

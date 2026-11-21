@@ -1,5 +1,11 @@
 import * as XLSX from 'xlsx';
 import { ImportedCatalogRow } from '../types/pos';
+import {
+  inferCategoryFromProductName,
+  isExplicitValidCategory,
+  normalizeBranchKey,
+  normalizeBranchName,
+} from './productCategory';
 
 export type SheetTabKind = 'catalog' | 'sales' | 'dashboard' | 'unknown';
 
@@ -351,7 +357,7 @@ export function parseSpreadsheetMatrix(
   sheetName = 'Sheet1'
 ): ParsedSheetTab {
   const tabBranchHint = inferBranchFromSheetName(sheetName);
-  let detectedBranch = tabBranchHint || defaultBranchName;
+  let detectedBranch = normalizeBranchName(tabBranchHint || defaultBranchName);
   let detectedMonth = defaultMonth;
   let isDashboard = false;
 
@@ -368,7 +374,7 @@ export function parseSpreadsheetMatrix(
         for (let k = c + 1; k < Math.min(c + 5, row.length); k++) {
           const val = String(row[k] ?? '').trim();
           if (val && !val.toLowerCase().includes('tips')) {
-            detectedBranch = val;
+            detectedBranch = normalizeBranchName(val, detectedBranch);
             break;
           }
         }
@@ -860,23 +866,7 @@ export function parseSpreadsheetMatrix(
     const cleanName = (rawName || cleanSku).slice(0, 100);
     const rawCategory =
       idxCategory >= 0 ? String(row[idxCategory] ?? '').trim() : '';
-    const pollutedCategory = new Set([
-      'persen',
-      'tidak_ada',
-      'tidak ada',
-      'nominal',
-      'fixed',
-      'percent',
-      'none',
-      'cash',
-      'tunai',
-      'qris',
-      'transfer',
-    ]);
-    const category =
-      rawCategory && !pollutedCategory.has(rawCategory.toLowerCase())
-        ? rawCategory
-        : 'Umum';
+    const category = inferCategoryFromProductName(cleanName, rawCategory);
 
     let qtySold =
       idxQtySold >= 0 ? parseRupiahOrNumber(row[idxQtySold]) : 0;
@@ -904,11 +894,12 @@ export function parseSpreadsheetMatrix(
       ? parseRupiahOrNumber(row[idxInitialStock])
       : currentStock + qtySold;
 
-    const branchName =
+    const branchName = normalizeBranchName(
       (idxBranch >= 0 ? String(row[idxBranch] ?? '').trim() : '') ||
-      detectedBranch ||
-      defaultBranchName ||
-      'CFD Senayan';
+        detectedBranch ||
+        defaultBranchName ||
+        'CFD Senayan'
+    );
 
     let saleYear = defaultYear;
     let saleMonth = detectedMonth;
@@ -1056,16 +1047,21 @@ export function mergeSelectedTabs(
         Boolean(prev?.name) && prev!.name.toLowerCase() !== prev!.sku.toLowerCase();
       const rowHasRealName =
         Boolean(r.name) && r.name.toLowerCase() !== r.sku.toLowerCase();
+      const resolvedName = prevHasRealName
+        ? prev!.name
+        : rowHasRealName
+          ? r.name
+          : prev?.name || r.name;
       const entry = {
         sku: prev?.sku || r.sku,
-        name: prevHasRealName
-          ? prev!.name
-          : rowHasRealName
-            ? r.name
-            : prev?.name || r.name,
+        name: resolvedName,
         barcode: prev?.barcode || r.barcode,
-        category:
-          prev && prev.category !== 'Umum' ? prev.category : r.category,
+        category: inferCategoryFromProductName(
+          resolvedName,
+          isExplicitValidCategory(prev?.category)
+            ? prev!.category
+            : r.category
+        ),
         price: prev && prev.price > 0 ? prev.price : r.price,
       };
       masterBySku.set(skuKey, entry);
@@ -1096,7 +1092,8 @@ export function mergeSelectedTabs(
         }
       }
       const skuKey = resolvedSku.toLowerCase();
-      const bKey = r.branchName.trim().toLowerCase();
+      const cleanBranchName = normalizeBranchName(r.branchName);
+      const bKey = normalizeBranchKey(cleanBranchName);
       const yr = r.saleYear ?? new Date().getFullYear();
       const mo = r.saleMonth ?? new Date().getMonth() + 1;
 
@@ -1105,11 +1102,21 @@ export function mergeSelectedTabs(
       // Catalog tab (monitoring_stok) -> authoritative catalog + stock rows
       if (!isSalesOnly && hasDedicatedSalesTab) {
         const prev = merged.get(baseKey);
+        const resolvedName = prev?.name || master?.name || r.name;
+        const resolvedCategory = inferCategoryFromProductName(
+          resolvedName,
+          isExplicitValidCategory(prev?.category)
+            ? prev!.category
+            : isExplicitValidCategory(r.category)
+              ? r.category
+              : master?.category
+        );
         if (prev) {
           merged.set(baseKey, {
             ...prev,
-            name: prev.name || r.name,
-            category: prev.category !== 'Umum' ? prev.category : r.category,
+            branchName: cleanBranchName,
+            name: resolvedName,
+            category: resolvedCategory,
             price: prev.price > 0 ? prev.price : r.price,
             initialStock: r.hasStockData ? r.initialStock : prev.initialStock,
             currentStock: r.hasStockData ? r.currentStock : prev.currentStock,
@@ -1120,11 +1127,11 @@ export function mergeSelectedTabs(
         } else {
           merged.set(baseKey, {
             ...r,
+            branchName: cleanBranchName,
             sku: resolvedSku,
-            name: master?.name || r.name,
+            name: resolvedName,
             barcode: master?.barcode || r.barcode,
-            category:
-              r.category !== 'Umum' ? r.category : master?.category || 'Umum',
+            category: resolvedCategory,
             price: r.price > 0 ? r.price : master?.price || 0,
             qtySold: undefined,
             totalSales: undefined,
@@ -1139,22 +1146,28 @@ export function mergeSelectedTabs(
         const txLineKey = `tx::${bKey}::${txPart}::${skuKey}`;
         const prev = merged.get(txLineKey);
         if (prev) {
+          const nextQty = (prev.qtySold ?? 0) + (r.qtySold ?? 0);
+          const nextSales = (prev.totalSales ?? 0) + (r.totalSales ?? 0);
           merged.set(txLineKey, {
             ...prev,
-            qtySold: (prev.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
-            totalSales:
-              (prev.totalSales ?? 0) + (r.totalSales ?? 0) || undefined,
+            qtySold: nextQty > 0 ? nextQty : undefined,
+            totalSales: nextQty > 0 ? nextSales : undefined,
           });
         } else {
+          const resolvedName = master?.name || r.name;
+          const resolvedCategory = inferCategoryFromProductName(
+            resolvedName,
+            isExplicitValidCategory(master?.category)
+              ? master!.category
+              : r.category
+          );
           merged.set(txLineKey, {
             ...r,
+            branchName: cleanBranchName,
             sku: resolvedSku,
-            name: master?.name || r.name,
+            name: resolvedName,
             barcode: master?.barcode || r.barcode,
-            category:
-              master && master.category !== 'Umum'
-                ? master.category
-                : r.category,
+            category: resolvedCategory,
             price: r.price > 0 ? r.price : master?.price || 0,
             hasStockData: false,
           });
@@ -1164,27 +1177,38 @@ export function mergeSelectedTabs(
 
       // Single non-sales tab or multiple catalog tabs without dedicated sales tab
       const prev = merged.get(baseKey);
+      const resolvedName = prev?.name || master?.name || r.name;
+      const resolvedCategory = inferCategoryFromProductName(
+        resolvedName,
+        isExplicitValidCategory(prev?.category)
+          ? prev!.category
+          : isExplicitValidCategory(r.category)
+            ? r.category
+            : master?.category
+      );
       if (prev) {
+        const nextQty = (prev.qtySold ?? 0) + (r.qtySold ?? 0);
+        const nextSales = (prev.totalSales ?? 0) + (r.totalSales ?? 0);
         merged.set(baseKey, {
           ...prev,
-          name: prev.name || r.name,
-          category: prev.category !== 'Umum' ? prev.category : r.category,
+          branchName: cleanBranchName,
+          name: resolvedName,
+          category: resolvedCategory,
           price: prev.price > 0 ? prev.price : r.price,
           initialStock: r.hasStockData ? r.initialStock : prev.initialStock,
           currentStock: r.hasStockData ? r.currentStock : prev.currentStock,
           hasStockData: prev.hasStockData || r.hasStockData,
-          qtySold: (prev.qtySold ?? 0) + (r.qtySold ?? 0) || undefined,
-          totalSales:
-            (prev.totalSales ?? 0) + (r.totalSales ?? 0) || undefined,
+          qtySold: nextQty > 0 ? nextQty : undefined,
+          totalSales: nextQty > 0 ? nextSales : undefined,
         });
       } else {
         merged.set(baseKey, {
           ...r,
+          branchName: cleanBranchName,
           sku: resolvedSku,
-          name: master?.name || r.name,
+          name: resolvedName,
           barcode: master?.barcode || r.barcode,
-          category:
-            r.category !== 'Umum' ? r.category : master?.category || 'Umum',
+          category: resolvedCategory,
           price: r.price > 0 ? r.price : master?.price || 0,
         });
       }

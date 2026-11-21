@@ -28,6 +28,7 @@ import { DEFAULT_DISCOUNT } from './data/catalog';
 import { auth } from './firebase';
 import {
   adjustBranchStockAtomic,
+  autoCategorizeProductsInFirestore,
   clearImportedSalesData,
   createTransactionAtomic,
   deleteBranchFromFirestore,
@@ -752,6 +753,9 @@ export default function App() {
             });
           }}
           onDeleteProduct={(id) => deleteProductFromFirestore(user.uid, id)}
+          onAutoCategorizeProducts={() =>
+            autoCategorizeProductsInFirestore(user.uid, products)
+          }
           onSaveVoucher={(input) => saveVoucherToFirestore(user.uid, input)}
           onDeleteVoucher={(id) => deleteVoucherFromFirestore(id)}
           onSaveStaff={(input) => saveStaffAccountToFirestore(user.uid, input)}

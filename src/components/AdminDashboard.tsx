@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Sparkles,
   Store,
   Tag,
   Trash2,
@@ -36,6 +37,7 @@ import {
   VoucherDef,
 } from '../types/pos';
 import { formatDateTime, formatNumber, formatRupiah } from '../utils/format';
+import { inferCategoryFromProductName } from '../utils/productCategory';
 import { ImportMigrationPanel } from './ImportMigrationPanel';
 import { InventoryBranchPanel } from './InventoryBranchPanel';
 import { RestockAnalyticsPanel } from './RestockAnalyticsPanel';
@@ -124,6 +126,7 @@ interface AdminDashboardProps {
     initialStockQty?: number;
   }) => Promise<void>;
   onDeleteProduct: (productId: string) => Promise<void>;
+  onAutoCategorizeProducts: () => Promise<{ updatedCount: number }>;
   onSaveVoucher: (input: {
     id?: string;
     code: string;
@@ -170,6 +173,7 @@ export function AdminDashboard({
   onClearImportedSales,
   onSaveProduct,
   onDeleteProduct,
+  onAutoCategorizeProducts,
   onSaveVoucher,
   onDeleteVoucher,
   onSaveStaff,
@@ -217,6 +221,7 @@ export function AdminDashboard({
   );
   const [prodInitStock, setProdInitStock] = useState('10');
   const [prodSaving, setProdSaving] = useState(false);
+  const [autoCatRunning, setAutoCatRunning] = useState(false);
 
   useEffect(() => {
     if (!prodInitBranchId && branches.length > 0) {
@@ -259,6 +264,20 @@ export function AdminDashboard({
       resetProdForm();
     } finally {
       setProdSaving(false);
+    }
+  };
+
+  const handleAutoCategorizeAll = async () => {
+    setAutoCatRunning(true);
+    try {
+      const res = await onAutoCategorizeProducts();
+      flashNotice(
+        res.updatedCount > 0
+          ? `${res.updatedCount} produk diperbarui kategorinya otomatis berdasarkan nama produk`
+          : 'Semua kategori produk sudah sesuai dengan nama produk'
+      );
+    } finally {
+      setAutoCatRunning(false);
     }
   };
 
@@ -632,6 +651,7 @@ export function AdminDashboard({
                 branches={branches}
                 products={products}
                 branchStocks={branchStocks}
+                salesLines={salesLines}
                 stockLogs={stockLogs}
                 activeBranchId={activeBranchId}
                 onSelectActiveBranch={onSelectActiveBranch}
@@ -686,8 +706,17 @@ export function AdminDashboard({
                       required
                       maxLength={100}
                       value={prodName}
-                      onChange={(e) => setProdName(e.target.value)}
-                      placeholder="Contoh: Daypack Hikemore Wagner NV"
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setProdName(val);
+                        if (!prodEditId) {
+                          const inferred = inferCategoryFromProductName(val);
+                          if (inferred !== 'Umum') {
+                            setProdCategory(inferred);
+                          }
+                        }
+                      }}
+                      placeholder="Contoh: Celana Panjang Alfea"
                       className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
                     />
                   </div>
@@ -828,15 +857,30 @@ export function AdminDashboard({
                     <span className="text-xs font-bold text-slate-700">
                       Master Produk ({filteredProducts.length})
                     </span>
-                    <div className="relative w-full sm:w-56">
-                      <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-                      <input
-                        type="text"
-                        value={prodSearch}
-                        onChange={(e) => setProdSearch(e.target.value)}
-                        placeholder="Cari nama, Kode Item, kategori..."
-                        className="h-8 w-full rounded-lg border border-slate-300 pr-3 pl-8 text-xs focus:border-[#1B8EE6] focus:outline-none"
-                      />
+                    <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+                      <button
+                        type="button"
+                        disabled={autoCatRunning || products.length === 0}
+                        onClick={() => void handleAutoCategorizeAll()}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 text-[11px] font-bold text-[#1B8EE6] hover:bg-sky-100 disabled:opacity-50 whitespace-nowrap"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        <span>
+                          {autoCatRunning
+                            ? 'Memperbarui...'
+                            : 'Kategori Otomatis'}
+                        </span>
+                      </button>
+                      <div className="relative flex-1 sm:w-56 sm:flex-initial">
+                        <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          value={prodSearch}
+                          onChange={(e) => setProdSearch(e.target.value)}
+                          placeholder="Cari nama, Kode Item, kategori..."
+                          className="h-8 w-full rounded-lg border border-slate-300 pr-3 pl-8 text-xs focus:border-[#1B8EE6] focus:outline-none"
+                        />
+                      </div>
                     </div>
                   </div>
                   <div className="overflow-x-auto">

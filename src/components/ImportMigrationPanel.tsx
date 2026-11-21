@@ -14,7 +14,8 @@ import {
 } from 'lucide-react';
 import { HIKEMORE_SEED_ROWS, MONTH_OPTIONS } from '../data/catalog';
 import { Branch, ImportProgress, ImportedCatalogRow } from '../types/pos';
-import { formatRupiah } from '../utils/format';
+import { formatNumber, formatRupiah } from '../utils/format';
+import { normalizeBranchKey } from '../utils/productCategory';
 import {
   ParsedSheetTab,
   ParsedWorkbookResult,
@@ -140,11 +141,25 @@ export function ImportMigrationPanel({
   const previewStats = useMemo(() => {
     const skus = new Set(previewRows.map((r) => r.sku.toLowerCase()));
     const txCodes = new Set<string>();
+    const catalogStockByBranchSku = new Map<string, number>();
+    const catalogStockBySku = new Map<string, number>();
     let txRowCount = 0;
     let catalogRowCount = 0;
+    let totalCurrentStock = 0;
+    let hasCatalogStock = false;
     let totalQtySold = 0;
     let totalOmset = 0;
     for (const r of previewRows) {
+      if (r.hasStockData !== false) {
+        hasCatalogStock = true;
+        const bKey = `${normalizeBranchKey(r.branchName)}::${r.sku.toLowerCase()}`;
+        const sKey = r.sku.toLowerCase();
+        if (!catalogStockByBranchSku.has(bKey)) {
+          totalCurrentStock += r.currentStock;
+        }
+        catalogStockByBranchSku.set(bKey, r.currentStock);
+        catalogStockBySku.set(sKey, r.currentStock);
+      }
       if (r.transactionCode?.trim()) {
         txRowCount += 1;
       } else {
@@ -156,7 +171,7 @@ export function ImportMigrationPanel({
           r.totalSales !== undefined ? r.totalSales : (r.qtySold ?? 0) * r.price;
         if (r.transactionCode?.trim()) {
           txCodes.add(
-            `${r.branchName.toLowerCase()}::${r.transactionCode.trim().toLowerCase()}`
+            `${normalizeBranchKey(r.branchName)}::${r.transactionCode.trim().toLowerCase()}`
           );
         }
       }
@@ -167,6 +182,10 @@ export function ImportMigrationPanel({
       hasTxCodes: txCodes.size > 0,
       txRowCount,
       catalogRowCount,
+      hasCatalogStock,
+      totalCurrentStock,
+      catalogStockByBranchSku,
+      catalogStockBySku,
       totalQtySold,
       totalOmset,
     };
@@ -971,11 +990,14 @@ export function ImportMigrationPanel({
               <div className="text-xs font-bold text-slate-900">
                 Pratinjau Data Siap Disinkronkan ({previewRows.length} baris ·{' '}
                 {previewStats.uniqueSkus} produk unik
+                {previewStats.hasCatalogStock
+                  ? ` · Total Sisa Stok: ${formatNumber(previewStats.totalCurrentStock)} pcs`
+                  : ''}
                 {previewStats.uniqueTxCount > 0
                   ? ` · ${previewStats.uniqueTxCount} trx`
                   : ''}
                 {' · '}
-                {previewStats.totalQtySold} pcs terjual ·{' '}
+                {formatNumber(previewStats.totalQtySold)} pcs terjual ·{' '}
                 {formatRupiah(previewStats.totalOmset)} · {sourceLabel})
               </div>
               <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-600">
@@ -1119,62 +1141,80 @@ export function ImportMigrationPanel({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {visiblePreviewRows.map((row, idx) => (
-                  <tr
-                    key={`${row.branchName}-${row.transactionCode ?? ''}-${row.sku}-${row.saleYear ?? ''}-${row.saleMonth ?? ''}-${idx}`}
-                    className="hover:bg-slate-50"
-                  >
-                    <td className="font-mono-num px-3 py-2 text-slate-400">
-                      {idx + 1}
-                    </td>
-                    {previewStats.hasTxCodes && previewFilter !== 'catalog' && (
-                      <td className="font-mono-num px-3 py-2 font-semibold text-slate-700 whitespace-nowrap">
-                        {row.transactionCode || '—'}
-                      </td>
-                    )}
-                    <td className="font-mono-num px-3 py-2 text-slate-600">
-                      {row.sku}
-                    </td>
-                    <td className="px-3 py-2 font-semibold text-slate-900">
-                      {row.name}
-                    </td>
-                    <td className="px-3 py-2 text-slate-600">{row.category}</td>
-                    <td className="px-3 py-2 text-slate-600">
-                      {row.branchName}
-                    </td>
-                    <td className="font-mono-num px-3 py-2 text-slate-600 whitespace-nowrap">
-                      {row.qtySold && row.saleMonth
-                        ? `${MONTH_SHORT_MAP[row.saleMonth] ?? row.saleMonth} ${row.saleYear ?? defaultYear}`
-                        : '—'}
-                    </td>
-                    <td className="font-mono-num px-3 py-2 text-right text-slate-800">
-                      {formatRupiah(row.price)}
-                    </td>
-                    <td
-                      className={`font-mono-num px-3 py-2 text-right font-bold ${
-                        row.hasStockData === false
-                          ? 'text-slate-400 font-normal'
-                          : row.currentStock <= 0
-                            ? 'text-rose-600'
-                            : 'text-slate-900'
-                      }`}
+                {visiblePreviewRows.map((row, idx) => {
+                  const matchedCatalogStock =
+                    row.hasStockData === false
+                      ? (previewStats.catalogStockByBranchSku.get(
+                          `${normalizeBranchKey(row.branchName)}::${row.sku.toLowerCase()}`
+                        ) ??
+                        previewStats.catalogStockBySku.get(
+                          row.sku.toLowerCase()
+                        ))
+                      : row.currentStock;
+
+                  return (
+                    <tr
+                      key={`${row.branchName}-${row.transactionCode ?? ''}-${row.sku}-${row.saleYear ?? ''}-${row.saleMonth ?? ''}-${idx}`}
+                      className="hover:bg-slate-50"
                     >
-                      {row.hasStockData === false ? 'Tetap' : row.currentStock}
-                    </td>
-                    <td className="font-mono-num px-3 py-2 text-right text-slate-700">
-                      {row.qtySold ? `${row.qtySold} pcs` : '—'}
-                    </td>
-                    <td className="font-mono-num px-3 py-2 text-right font-semibold text-emerald-700">
-                      {row.qtySold
-                        ? formatRupiah(
-                            row.totalSales !== undefined
-                              ? row.totalSales
-                              : row.qtySold * row.price
-                          )
-                        : '—'}
-                    </td>
-                  </tr>
-                ))}
+                      <td className="font-mono-num px-3 py-2 text-slate-400">
+                        {idx + 1}
+                      </td>
+                      {previewStats.hasTxCodes && previewFilter !== 'catalog' && (
+                        <td className="font-mono-num px-3 py-2 font-semibold text-slate-700 whitespace-nowrap">
+                          {row.transactionCode || '—'}
+                        </td>
+                      )}
+                      <td className="font-mono-num px-3 py-2 text-slate-600">
+                        {row.sku}
+                      </td>
+                      <td className="px-3 py-2 font-semibold text-slate-900">
+                        {row.name}
+                      </td>
+                      <td className="px-3 py-2 text-slate-600">
+                        {row.category}
+                      </td>
+                      <td className="px-3 py-2 text-slate-600">
+                        {row.branchName}
+                      </td>
+                      <td className="font-mono-num px-3 py-2 text-slate-600 whitespace-nowrap">
+                        {row.qtySold && row.saleMonth
+                          ? `${MONTH_SHORT_MAP[row.saleMonth] ?? row.saleMonth} ${row.saleYear ?? defaultYear}`
+                          : '—'}
+                      </td>
+                      <td className="font-mono-num px-3 py-2 text-right text-slate-800 whitespace-nowrap">
+                        {formatRupiah(row.price)}
+                      </td>
+                      <td
+                        className={`font-mono-num px-3 py-2 text-right whitespace-nowrap ${
+                          matchedCatalogStock === undefined
+                            ? 'font-normal text-slate-400'
+                            : matchedCatalogStock <= 0
+                              ? 'font-bold text-rose-600'
+                              : row.hasStockData === false
+                                ? 'font-semibold text-slate-700'
+                                : 'font-bold text-slate-900'
+                        }`}
+                      >
+                        {matchedCatalogStock === undefined
+                          ? 'Tetap'
+                          : `${matchedCatalogStock} pcs`}
+                      </td>
+                      <td className="font-mono-num px-3 py-2 text-right text-slate-700 whitespace-nowrap">
+                        {row.qtySold ? `${row.qtySold} pcs` : '—'}
+                      </td>
+                      <td className="font-mono-num px-3 py-2 text-right font-semibold text-emerald-700 whitespace-nowrap">
+                        {row.qtySold
+                          ? formatRupiah(
+                              row.totalSales !== undefined
+                                ? row.totalSales
+                                : row.qtySold * row.price
+                            )
+                          : '—'}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
