@@ -125,13 +125,13 @@ export default function App() {
     let cancelled = false;
     setSyncingData(true);
 
-    const ownerName =
-      user.displayName || user.email?.split('@')[0] || 'Admin Utama';
+    const ownerUsername = user.email?.split('@')[0] || 'admin';
+    const ownerName = user.displayName || ownerUsername || 'Admin Utama';
 
     void (async () => {
       try {
         await ensureUserProfile(user.uid, ownerName);
-        await seedInitialDataIfNeeded(user.uid, ownerName);
+        await seedInitialDataIfNeeded(user.uid, ownerName, ownerUsername);
       } catch (err) {
         if (!cancelled) {
           setFatalError(err instanceof Error ? err : new Error(String(err)));

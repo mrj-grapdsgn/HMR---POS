@@ -145,7 +145,8 @@ export function subscribeUserProfile(
 
 export async function seedInitialDataIfNeeded(
   ownerId: string,
-  ownerDisplayName: string
+  ownerDisplayName: string,
+  ownerUsername?: string
 ): Promise<void> {
   if (!ID_PATTERN.test(ownerId)) return;
 
@@ -214,7 +215,7 @@ export async function seedInitialDataIfNeeded(
             0,
             DISPLAY_NAME_MAX
           ),
-          username: 'admin',
+          username: sanitizeUsername(ownerUsername || 'admin'),
           role: 'admin',
           active: true,
           createdAt: serverTimestamp(),

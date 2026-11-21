@@ -6,18 +6,32 @@ import {
 } from 'firebase/auth';
 import {
   AlertCircle,
+  AtSign,
   Eye,
   EyeOff,
   Loader2,
   Lock,
-  Mail,
   Store,
   User,
 } from 'lucide-react';
 import { FIREBASE_PROJECT_ID, auth } from '../firebase';
 import { ensureUserProfile } from '../services/posRepository';
 
-function mapAuthError(err: unknown): { message: string; needsProviderEnable?: boolean } {
+const USERNAME_REGEX = /^[a-z0-9._-]{3,30}$/;
+const INTERNAL_AUTH_DOMAIN = 'kasirpos.app';
+
+function normalizeUsername(raw: string): string {
+  return raw.trim().toLowerCase().replace(/^@+/, '');
+}
+
+function toInternalAuthEmail(username: string): string {
+  return `${username}@${INTERNAL_AUTH_DOMAIN}`;
+}
+
+function mapAuthError(err: unknown): {
+  message: string;
+  needsProviderEnable?: boolean;
+} {
   const code =
     typeof err === 'object' && err !== null && 'code' in err
       ? String((err as { code: unknown }).code)
@@ -26,7 +40,7 @@ function mapAuthError(err: unknown): { message: string; needsProviderEnable?: bo
   if (code === 'auth/operation-not-allowed') {
     return {
       message:
-        'Metode login Email/Password belum diaktifkan di Firebase Console.',
+        'Provider Email/Password belum diaktifkan di Firebase Console (dibutuhkan Firebase untuk autentikasi Username & Kata Sandi).',
       needsProviderEnable: true,
     };
   }
@@ -35,16 +49,24 @@ function mapAuthError(err: unknown): { message: string; needsProviderEnable?: bo
     code === 'auth/wrong-password' ||
     code === 'auth/user-not-found'
   ) {
-    return { message: 'Email atau kata sandi salah. Silakan periksa kembali.' };
+    return {
+      message: 'Username atau kata sandi salah. Silakan periksa kembali.',
+    };
   }
   if (code === 'auth/email-already-in-use') {
-    return { message: 'Email ini sudah terdaftar. Silakan masuk di tab Masuk.' };
+    return {
+      message:
+        'Username ini sudah digunakan. Silakan pilih username lain atau masuk di tab Masuk Akun.',
+    };
   }
   if (code === 'auth/weak-password') {
     return { message: 'Kata sandi terlalu lemah (minimal 6 karakter).' };
   }
   if (code === 'auth/invalid-email') {
-    return { message: 'Format alamat email tidak valid.' };
+    return {
+      message:
+        'Format username tidak valid. Gunakan huruf, angka, titik (.), garis bawah (_), atau tanda hubung (-).',
+    };
   }
   if (code === 'auth/too-many-requests') {
     return {
@@ -61,7 +83,7 @@ export function AuthScreen() {
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [displayName, setDisplayName] = useState('');
   const [storeName, setStoreName] = useState('');
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -75,15 +97,32 @@ export function AuthScreen() {
     e.preventDefault();
     setError(null);
 
-    const trimmedEmail = email.trim();
-    if (!trimmedEmail || !password) {
-      setError({ message: 'Email dan kata sandi wajib diisi.' });
+    const rawInput = username.trim();
+    if (!rawInput || !password) {
+      setError({ message: 'Username dan kata sandi wajib diisi.' });
       return;
     }
+
+    let authIdentifier = '';
 
     if (mode === 'register') {
       if (!displayName.trim()) {
         setError({ message: 'Nama lengkap wajib diisi.' });
+        return;
+      }
+      if (rawInput.includes('@')) {
+        setError({
+          message:
+            'Pendaftaran menggunakan username tanpa email (contoh: admin_toko atau budi01).',
+        });
+        return;
+      }
+      const cleanUsername = normalizeUsername(rawInput);
+      if (!USERNAME_REGEX.test(cleanUsername)) {
+        setError({
+          message:
+            'Username harus 3–30 karakter dan hanya boleh huruf, angka, titik (.), garis bawah (_), atau tanda hubung (-).',
+        });
         return;
       }
       if (password.length < 6) {
@@ -94,16 +133,32 @@ export function AuthScreen() {
         setError({ message: 'Konfirmasi kata sandi tidak cocok.' });
         return;
       }
+      authIdentifier = toInternalAuthEmail(cleanUsername);
+    } else {
+      // Login: supports username; also stays compatible if user had an earlier email account
+      if (rawInput.includes('@') && !rawInput.startsWith('@')) {
+        authIdentifier = rawInput.toLowerCase();
+      } else {
+        const cleanUsername = normalizeUsername(rawInput);
+        if (!USERNAME_REGEX.test(cleanUsername)) {
+          setError({
+            message:
+              'Username tidak valid. Gunakan 3–30 karakter (huruf, angka, ., _, -).',
+          });
+          return;
+        }
+        authIdentifier = toInternalAuthEmail(cleanUsername);
+      }
     }
 
     setLoading(true);
     try {
       if (mode === 'login') {
-        await signInWithEmailAndPassword(auth, trimmedEmail, password);
+        await signInWithEmailAndPassword(auth, authIdentifier, password);
       } else {
         const cred = await createUserWithEmailAndPassword(
           auth,
-          trimmedEmail,
+          authIdentifier,
           password
         );
         await updateProfile(cred.user, { displayName: displayName.trim() });
@@ -216,19 +271,30 @@ export function AuthScreen() {
 
           <div>
             <label className="mb-1 block text-xs font-bold text-slate-700">
-              Email Pengguna
+              Username
             </label>
             <div className="relative">
-              <Mail className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <AtSign className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400" />
               <input
-                type="email"
+                type="text"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@tokoanda.com"
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
+                maxLength={mode === 'register' ? 30 : 80}
+                value={username}
+                onChange={(e) =>
+                  setUsername(e.target.value.replace(/\s+/g, ''))
+                }
+                placeholder="Contoh: admin_toko"
                 className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#1B8EE6] focus:outline-none focus:ring-2 focus:ring-sky-100"
               />
             </div>
+            {mode === 'register' && (
+              <p className="mt-1 text-[11px] text-slate-500">
+                Tanpa email. Gunakan 3–30 karakter (huruf, angka, titik, _, atau -).
+              </p>
+            )}
           </div>
 
           <div>
@@ -240,6 +306,9 @@ export function AuthScreen() {
               <input
                 type={showPassword ? 'text' : 'password'}
                 required
+                autoComplete={
+                  mode === 'login' ? 'current-password' : 'new-password'
+                }
                 minLength={6}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -271,6 +340,7 @@ export function AuthScreen() {
                 <input
                   type={showPassword ? 'text' : 'password'}
                   required
+                  autoComplete="new-password"
                   minLength={6}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
