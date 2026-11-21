@@ -2154,6 +2154,10 @@ export async function importCatalogRowsToFirestore(
           product: Product;
           qty: number;
           unitPrice: number;
+          grossTotal: number;
+          discountAmount: number;
+          discountType?: DiscountMode;
+          discountLabel?: string;
           lineTotal: number;
         };
         type PendingTxGroup = {
@@ -2163,6 +2167,14 @@ export async function importCatalogRowsToFirestore(
           saleMonth: number;
           linesByProduct: Map<string, TxLineEntry>;
         };
+
+        const VALID_DISCOUNT_MODES = new Set<DiscountMode>([
+          'none',
+          'fixed',
+          'percent',
+          'exact',
+          'voucher',
+        ]);
 
         const txGroups = new Map<string, PendingTxGroup>();
         rawSalesRows.forEach((sr, idx) => {
@@ -2197,12 +2209,31 @@ export async function importCatalogRowsToFirestore(
               )
             )
           );
+          const rawGross =
+            sr.grossSales !== undefined
+              ? Math.round(sr.grossSales)
+              : sr.discountAmount && sr.discountAmount > 0
+                ? lineTotal + Math.round(sr.discountAmount)
+                : lineTotal;
+          const grossTotal = Math.min(
+            1000000000,
+            Math.max(lineTotal, rawGross)
+          );
+          const discountAmount = Math.min(
+            1000000000,
+            Math.max(0, grossTotal - lineTotal)
+          );
+          const discountType =
+            sr.discountType && VALID_DISCOUNT_MODES.has(sr.discountType)
+              ? sr.discountType
+              : undefined;
+          const discountLabel = sr.discountLabel?.trim() || undefined;
           const unitPrice = Math.min(
             1000000000,
             sr.price > 0
               ? Math.round(sr.price)
               : qty > 0
-                ? Math.round(lineTotal / qty)
+                ? Math.round(grossTotal / qty)
                 : product.price
           );
 
@@ -2223,10 +2254,21 @@ export async function importCatalogRowsToFirestore(
           if (prevLine) {
             const nextQty = Math.min(10000, prevLine.qty + qty);
             const nextTotal = Math.min(1000000000, prevLine.lineTotal + lineTotal);
+            const nextGross = Math.min(
+              1000000000,
+              Math.max(nextTotal, prevLine.grossTotal + grossTotal)
+            );
             group.linesByProduct.set(product.id, {
               product,
               qty: nextQty,
               unitPrice: prevLine.unitPrice > 0 ? prevLine.unitPrice : unitPrice,
+              grossTotal: nextGross,
+              discountAmount: Math.max(0, nextGross - nextTotal),
+              discountType:
+                prevLine.discountType && prevLine.discountType !== 'none'
+                  ? prevLine.discountType
+                  : discountType,
+              discountLabel: prevLine.discountLabel || discountLabel,
               lineTotal: nextTotal,
             });
           } else {
@@ -2234,6 +2276,10 @@ export async function importCatalogRowsToFirestore(
               product,
               qty,
               unitPrice,
+              grossTotal,
+              discountAmount,
+              discountType,
+              discountLabel,
               lineTotal,
             });
           }
@@ -2345,6 +2391,35 @@ export async function importCatalogRowsToFirestore(
                     1000000000,
                     txItem.lines.reduce((s, l) => s + l.lineTotal, 0)
                   );
+                  const subtotal = Math.min(
+                    1000000000,
+                    Math.max(
+                      grandTotal,
+                      txItem.lines.reduce((s, l) => s + l.grossTotal, 0)
+                    )
+                  );
+                  const discountAmount = Math.min(
+                    1000000000,
+                    Math.max(0, subtotal - grandTotal)
+                  );
+                  const detectedMode = txItem.lines.find(
+                    (l) => l.discountType && l.discountType !== 'none'
+                  )?.discountType;
+                  const discountMode: DiscountMode =
+                    discountAmount > 0
+                      ? detectedMode && VALID_DISCOUNT_MODES.has(detectedMode)
+                        ? detectedMode
+                        : 'fixed'
+                      : 'none';
+                  const customLabel = txItem.lines.find(
+                    (l) => l.discountLabel && l.discountLabel.trim()
+                  )?.discountLabel;
+                  const adjustmentLabel = (
+                    discountAmount > 0
+                      ? customLabel ||
+                        `Diskon Impor ${txItem.saleMonth}/${txItem.saleYear}`
+                      : `Sinkron Data Penjualan ${txItem.saleMonth}/${txItem.saleYear}`
+                  ).slice(0, 100);
 
                   txBatch.set(doc(db, 'transactions', txId), {
                     ownerId,
@@ -2357,10 +2432,10 @@ export async function importCatalogRowsToFirestore(
                     source: 'import',
                     itemCount: Math.max(1, txItem.lines.length),
                     totalQty,
-                    subtotal: grandTotal,
-                    discountMode: 'none',
-                    discountAmount: 0,
-                    adjustmentLabel: `Sinkron Data Penjualan ${txItem.saleMonth}/${txItem.saleYear}`,
+                    subtotal,
+                    discountMode,
+                    discountAmount,
+                    adjustmentLabel,
                     grandTotal,
                     paymentMethod: 'cash',
                     amountPaid: grandTotal,
@@ -2427,6 +2502,7 @@ export async function importCatalogRowsToFirestore(
           saleYear: number;
           saleMonth: number;
           qty: number;
+          grossTotal: number;
           lineTotal: number;
           unitPrice: number;
         };
@@ -2457,11 +2533,18 @@ export async function importCatalogRowsToFirestore(
               sr.totalSales !== undefined ? sr.totalSales : product.price * qty
             )
           );
+          const rawGross =
+            sr.grossSales !== undefined
+              ? Math.round(sr.grossSales)
+              : sr.discountAmount && sr.discountAmount > 0
+                ? lineTotal + Math.round(sr.discountAmount)
+                : lineTotal;
+          const grossTotal = Math.max(lineTotal, rawGross);
           const unitPrice =
             sr.price > 0
               ? Math.round(sr.price)
               : qty > 0
-                ? Math.round(lineTotal / qty)
+                ? Math.round(grossTotal / qty)
                 : product.price;
 
           const aggKey = `${branch.id}::${product.id}::${saleYear}::${saleMonth}`;
@@ -2470,6 +2553,7 @@ export async function importCatalogRowsToFirestore(
             incomingAgg.set(aggKey, {
               ...prev,
               qty: prev.qty + qty,
+              grossTotal: prev.grossTotal + grossTotal,
               lineTotal: prev.lineTotal + lineTotal,
               unitPrice: prev.unitPrice > 0 ? prev.unitPrice : unitPrice,
             });
@@ -2480,6 +2564,7 @@ export async function importCatalogRowsToFirestore(
               saleYear,
               saleMonth,
               qty,
+              grossTotal,
               lineTotal,
               unitPrice,
             });
@@ -2501,17 +2586,23 @@ export async function importCatalogRowsToFirestore(
             1000000000,
             Math.max(0, entry.lineTotal - (already?.lineTotal ?? 0))
           );
+          const ratio = entry.qty > 0 ? deltaQty / entry.qty : 1;
+          const deltaGross = Math.min(
+            1000000000,
+            Math.max(deltaTotal, Math.round(entry.grossTotal * ratio))
+          );
           const unitPrice = Math.min(
             1000000000,
             entry.unitPrice > 0
               ? entry.unitPrice
               : deltaQty > 0
-                ? Math.round(deltaTotal / deltaQty)
+                ? Math.round(deltaGross / deltaQty)
                 : 0
           );
           deltaEntries.push({
             ...entry,
             qty: deltaQty,
+            grossTotal: deltaGross,
             lineTotal: deltaTotal,
             unitPrice,
           });
@@ -2576,6 +2667,19 @@ export async function importCatalogRowsToFirestore(
               1000000000,
               validEntries.reduce((s, e) => s + e.lineTotal, 0)
             );
+            const subtotal = Math.min(
+              1000000000,
+              Math.max(
+                grandTotal,
+                validEntries.reduce((s, e) => s + e.grossTotal, 0)
+              )
+            );
+            const discountAmount = Math.min(
+              1000000000,
+              Math.max(0, subtotal - grandTotal)
+            );
+            const discountMode: DiscountMode =
+              discountAmount > 0 ? 'fixed' : 'none';
 
             const txBatch = writeBatch(db);
             txBatch.set(doc(db, 'transactions', txId), {
@@ -2589,10 +2693,14 @@ export async function importCatalogRowsToFirestore(
               source: 'import',
               itemCount: validEntries.length,
               totalQty: Math.max(1, totalQty),
-              subtotal: grandTotal,
-              discountMode: 'none',
-              discountAmount: 0,
-              adjustmentLabel: `Sinkron Data Penjualan ${saleMonth}/${saleYear}`,
+              subtotal,
+              discountMode,
+              discountAmount,
+              adjustmentLabel: (
+                discountAmount > 0
+                  ? `Diskon Impor ${saleMonth}/${saleYear}`
+                  : `Sinkron Data Penjualan ${saleMonth}/${saleYear}`
+              ).slice(0, 100),
               grandTotal,
               paymentMethod: 'cash',
               amountPaid: grandTotal,

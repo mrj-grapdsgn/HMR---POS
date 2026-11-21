@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { ImportedCatalogRow } from '../types/pos';
+import { DiscountMode, ImportedCatalogRow } from '../types/pos';
 import {
   inferCategoryFromProductName,
   isExplicitValidCategory,
@@ -20,6 +20,9 @@ export interface DetectedColumnMap {
   currentStock?: string;
   qtySold?: string;
   totalSales?: string;
+  discountType?: string;
+  discountValue?: string;
+  netTotal?: string;
   date?: string;
 }
 
@@ -170,6 +173,88 @@ function parseRupiahOrNumber(raw: unknown): number {
   const digits = normalized.replace(/[^0-9-]/g, '');
   const n = parseInt(digits, 10);
   return Number.isFinite(n) ? Math.max(0, n) : 0;
+}
+
+/**
+ * Parses a discount value cell, preserving fractional percentages (e.g. 0.1 = 10% in Excel)
+ * and explicit "%" suffixes (e.g. "15%"), while handling Indonesian Rupiah formatting.
+ */
+function parseDiscountNumber(raw: unknown): {
+  num: number;
+  isPercentLiteral: boolean;
+} {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return { num: Math.max(0, raw), isPercentLiteral: false };
+  }
+  const s = String(raw ?? '').trim();
+  if (!s) return { num: 0, isPercentLiteral: false };
+
+  const hasPercentSign = s.includes('%');
+  if (hasPercentSign) {
+    const cleaned = s.replace(/%/g, '').replace(',', '.').replace(/[^0-9.]/g, '');
+    const parsed = parseFloat(cleaned);
+    return {
+      num: Number.isFinite(parsed) ? Math.max(0, parsed) : 0,
+      isPercentLiteral: true,
+    };
+  }
+
+  // Handle small decimal values like "0.1" or "0,15" (Excel percentage format stored as float)
+  const simpleDec = s.replace(',', '.');
+  if (/^0\.\d+$/.test(simpleDec)) {
+    const parsed = parseFloat(simpleDec);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed < 1) {
+      return { num: parsed, isPercentLiteral: false };
+    }
+  }
+
+  return { num: parseRupiahOrNumber(s), isPercentLiteral: false };
+}
+
+function parseDiscountMode(raw: unknown): DiscountMode {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (
+    !s ||
+    s === 'tidak ada' ||
+    s === 'none' ||
+    s === 'tanpa' ||
+    s === 'tanpa diskon' ||
+    s === 'no discount' ||
+    s === '0' ||
+    s === '-'
+  ) {
+    return 'none';
+  }
+  if (s.includes('persen') || s.includes('percent') || s.includes('%')) {
+    return 'percent';
+  }
+  if (s.includes('voucher') || s.includes('kupon') || s.includes('promo')) {
+    return 'voucher';
+  }
+  if (s.includes('pas') || s.includes('exact')) {
+    return 'exact';
+  }
+  if (
+    s.includes('nominal') ||
+    s.includes('rupiah') ||
+    s.includes('rp') ||
+    s.includes('fixed') ||
+    s.includes('potongan') ||
+    s.includes('amount')
+  ) {
+    return 'fixed';
+  }
+  return 'none';
+}
+
+function isCellPopulated(raw: unknown): boolean {
+  if (raw === null || raw === undefined) return false;
+  if (typeof raw === 'number') return Number.isFinite(raw);
+  return String(raw).trim() !== '';
 }
 
 function parseMonth(raw: unknown, fallbackMonth: number): number {
@@ -723,10 +808,56 @@ export function parseSpreadsheetMatrix(
       'voucher',
     ]
   );
+  // Explicit post-discount / net total column (if sheet separates Subtotal vs Total Akhir / Bersih)
+  const rawIdxNetTotal = findColIndex(
+    headers,
+    [
+      'total setelah diskon',
+      'setelah diskon',
+      'harga setelah diskon',
+      'total bersih',
+      'omset bersih',
+      'net sales',
+      'net total',
+      'net amount',
+      'total akhir',
+      'harga akhir',
+      'grand total',
+      'total bayar',
+      'total dibayar',
+      'total final',
+      'final total',
+    ],
+    [
+      'metode',
+      'cara',
+      'status',
+      'uang',
+      'tunai',
+      'cash',
+      'kembalian',
+      'kembali',
+      'diterima',
+      'pelanggan',
+      'tipe',
+      'jenis',
+      'diskon %',
+      'nilai diskon',
+      'jumlah diskon',
+      'nominal diskon',
+      'total diskon',
+    ]
+  );
+
   const rawIdxTotalSales = findColIndex(
     headers,
     [
       'total penjualan',
+      'subtotal',
+      'sub total',
+      'total kotor',
+      'omset kotor',
+      'total sebelum diskon',
       'total omset',
       'nilai penjualan',
       'total harga',
@@ -737,7 +868,6 @@ export function parseSpreadsheetMatrix(
       'omset',
       'pendapatan',
       'penjualan',
-      'subtotal',
       'revenue',
       'sales',
       'total',
@@ -763,11 +893,76 @@ export function parseSpreadsheetMatrix(
       'potongan',
       'kembalian',
       'kembali',
+      'uang bayar',
+      'metode',
     ]
   );
   // CRITICAL: Never let Total Sales collide with Qty Sold (e.g. "Total Terjual") which creates fake Rp 1 prices!
   const idxTotalSales =
     rawIdxTotalSales === idxQtySold ? -1 : rawIdxTotalSales;
+  const idxNetTotal =
+    rawIdxNetTotal === idxQtySold || rawIdxNetTotal === idxTotalSales
+      ? -1
+      : rawIdxNetTotal;
+
+  // Discount columns (e.g. "Tipe Diskon", "Nilai Diskon", "Nominal Diskon", "Potongan")
+  const idxDiscountType = findColIndex(
+    headers,
+    [
+      'tipe diskon',
+      'jenis diskon',
+      'discount type',
+      'mode diskon',
+      'metode diskon',
+    ],
+    ['pembayaran', 'payment', 'produk', 'barang', 'item']
+  );
+  const rawIdxDiscountAmount = findColIndex(
+    headers,
+    [
+      'nominal diskon',
+      'jumlah diskon',
+      'total diskon',
+      'potongan diskon',
+      'potongan harga',
+      'potongan',
+      'diskon rp',
+      'diskon (rp)',
+      'discount amount',
+      'nilai potongan',
+      'rp diskon',
+    ],
+    ['tipe', 'jenis', 'mode', 'metode', 'setelah', 'sebelum', '%', 'persen']
+  );
+  const rawIdxDiscountValue = findColIndex(
+    headers,
+    [
+      'nilai diskon',
+      'besar diskon',
+      'persen diskon',
+      'diskon %',
+      'diskon (%)',
+      'discount value',
+      'discount percent',
+      'diskon',
+      'discount',
+    ],
+    ['tipe', 'jenis', 'mode', 'metode', 'setelah', 'sebelum', 'kode', 'voucher']
+  );
+  const idxDiscountAmount =
+    rawIdxDiscountAmount === idxQtySold ||
+    rawIdxDiscountAmount === idxTotalSales ||
+    rawIdxDiscountAmount === idxNetTotal
+      ? -1
+      : rawIdxDiscountAmount;
+  const idxDiscountValue =
+    rawIdxDiscountValue === idxQtySold ||
+    rawIdxDiscountValue === idxTotalSales ||
+    rawIdxDiscountValue === idxNetTotal ||
+    rawIdxDiscountValue === idxDiscountAmount
+      ? -1
+      : rawIdxDiscountValue;
+
   const idxBranch = findColIndex(headers, [
     'cabang',
     'nama cabang',
@@ -807,6 +1002,14 @@ export function parseSpreadsheetMatrix(
     currentStock: idxCurrentStock >= 0 ? rawHeaders[idxCurrentStock] : undefined,
     qtySold: idxQtySold >= 0 ? rawHeaders[idxQtySold] : undefined,
     totalSales: idxTotalSales >= 0 ? rawHeaders[idxTotalSales] : undefined,
+    discountType: idxDiscountType >= 0 ? rawHeaders[idxDiscountType] : undefined,
+    discountValue:
+      idxDiscountAmount >= 0
+        ? rawHeaders[idxDiscountAmount]
+        : idxDiscountValue >= 0
+          ? rawHeaders[idxDiscountValue]
+          : undefined,
+    netTotal: idxNetTotal >= 0 ? rawHeaders[idxNetTotal] : undefined,
     date: idxDate >= 0 ? rawHeaders[idxDate] : undefined,
   };
 
@@ -824,7 +1027,23 @@ export function parseSpreadsheetMatrix(
       ? 'sales'
       : 'catalog';
 
-  const parsedMap = new Map<string, ImportedCatalogRow>();
+  type RawParsedRow = {
+    dedupeKey: string;
+    txGroupKey: string;
+    row: ImportedCatalogRow;
+    hasPriceCol: boolean;
+    hasGrossCol: boolean;
+    hasNetCol: boolean;
+    grossColVal: number;
+    netColVal: number;
+    discMode: DiscountMode;
+    discValNum: number;
+    discValIsPercentLiteral: boolean;
+    discAmountRp: number;
+    hasExplicitDiscAmountCol: boolean;
+  };
+
+  const rawParsedRows: RawParsedRow[] = [];
   const uniqueTxSet = new Set<string>();
   let rawRowCount = 0;
 
@@ -870,18 +1089,66 @@ export function parseSpreadsheetMatrix(
 
     let qtySold =
       idxQtySold >= 0 ? parseRupiahOrNumber(row[idxQtySold]) : 0;
-    let totalSales =
-      idxTotalSales >= 0 ? parseRupiahOrNumber(row[idxTotalSales]) : 0;
+    const hasGrossCol =
+      idxTotalSales >= 0 && isCellPopulated(row[idxTotalSales]);
+    const hasNetCol = idxNetTotal >= 0 && isCellPopulated(row[idxNetTotal]);
+    const grossColVal = hasGrossCol
+      ? parseRupiahOrNumber(row[idxTotalSales])
+      : 0;
+    const netColVal = hasNetCol ? parseRupiahOrNumber(row[idxNetTotal]) : 0;
 
     let price = idxPrice >= 0 ? parseRupiahOrNumber(row[idxPrice]) : 0;
-    if (isSalesSheet && idxQtySold < 0 && (totalSales > 0 || price > 0)) {
+    const hasPriceCol = idxPrice >= 0 && price > 0;
+
+    if (
+      isSalesSheet &&
+      idxQtySold < 0 &&
+      (grossColVal > 0 || netColVal > 0 || price > 0)
+    ) {
       qtySold = 1;
     }
-    if (totalSales === 0 && qtySold > 0 && price > 0) {
-      totalSales = price * qtySold;
+
+    // Only synthesize gross from price * qty when the totalSales cell itself is missing/blank
+    // (preserves genuine Rp 0 Buy-1-Get-1 promo lines where cell explicitly contains 0).
+    let grossSales = hasGrossCol
+      ? grossColVal
+      : hasNetCol
+        ? netColVal
+        : qtySold > 0 && price > 0
+          ? price * qtySold
+          : 0;
+
+    if (price === 0 && qtySold > 0 && grossSales > 0) {
+      price = Math.round(grossSales / qtySold);
     }
-    if (price === 0 && qtySold > 0 && totalSales > 0) {
-      price = Math.round(totalSales / qtySold);
+
+    // Parse discount columns
+    const discModeRaw =
+      idxDiscountType >= 0 ? parseDiscountMode(row[idxDiscountType]) : 'none';
+    const discValParsed =
+      idxDiscountValue >= 0
+        ? parseDiscountNumber(row[idxDiscountValue])
+        : { num: 0, isPercentLiteral: false };
+    const discAmountRp =
+      idxDiscountAmount >= 0
+        ? parseRupiahOrNumber(row[idxDiscountAmount])
+        : 0;
+
+    let discMode: DiscountMode = discModeRaw;
+    if (discMode === 'none') {
+      if (discValParsed.isPercentLiteral && discValParsed.num > 0) {
+        discMode = 'percent';
+      } else if (
+        idxDiscountValue >= 0 &&
+        (headers[idxDiscountValue].includes('%') ||
+          headers[idxDiscountValue].includes('persen') ||
+          headers[idxDiscountValue].includes('percent')) &&
+        discValParsed.num > 0
+      ) {
+        discMode = 'percent';
+      } else if (discAmountRp > 0 || discValParsed.num > 0) {
+        discMode = 'fixed';
+      }
     }
 
     const hasCurrentStockCol = idxCurrentStock >= 0;
@@ -939,40 +1206,28 @@ export function parseSpreadsheetMatrix(
 
     rawRowCount += 1;
 
-    // For Data_Penjualan, preserve per-transaction rows keyed by (branch, transactionCode, sku)!
-    const dedupeKey = isSalesSheet
-      ? `${branchName.toLowerCase()}::${(transactionCode ?? '').toLowerCase()}::${cleanSku.toLowerCase()}`
+    const txGroupKey = isSalesSheet
+      ? `${branchName.toLowerCase()}::${(transactionCode ?? '').toLowerCase()}`
       : `${branchName.toLowerCase()}::${cleanSku.toLowerCase()}`;
 
-    const prev = parsedMap.get(dedupeKey);
-    if (prev && isSalesSheet) {
-      const nextQty = (prev.qtySold ?? 0) + qtySold;
-      const nextSales = (prev.totalSales ?? 0) + totalSales;
-      parsedMap.set(dedupeKey, {
-        ...prev,
-        name: prev.name || cleanName,
-        category:
-          prev.category !== 'Umum' ? prev.category : category.slice(0, 50),
-        price: prev.price > 0 ? prev.price : price,
-        qtySold: nextQty > 0 ? nextQty : undefined,
-        totalSales: nextQty > 0 ? nextSales : undefined,
-      });
-    } else if (prev) {
-      parsedMap.set(dedupeKey, {
-        ...prev,
-        name: cleanName || prev.name,
-        category: category !== 'Umum' ? category.slice(0, 50) : prev.category,
-        price: price > 0 ? price : prev.price,
-        initialStock: hasInitialStockCol ? initialStock : prev.initialStock,
-        currentStock: hasCurrentStockCol ? currentStock : prev.currentStock,
-        hasStockData: prev.hasStockData || hasStockData,
-        qtySold:
-          qtySold > 0 ? (prev.qtySold ?? 0) + qtySold : prev.qtySold,
-        totalSales:
-          qtySold > 0 ? (prev.totalSales ?? 0) + totalSales : prev.totalSales,
-      });
-    } else {
-      parsedMap.set(dedupeKey, {
+    const dedupeKey = isSalesSheet
+      ? `${txGroupKey}::${cleanSku.toLowerCase()}`
+      : `${branchName.toLowerCase()}::${cleanSku.toLowerCase()}`;
+
+    rawParsedRows.push({
+      dedupeKey,
+      txGroupKey,
+      hasPriceCol,
+      hasGrossCol,
+      hasNetCol,
+      grossColVal: grossSales,
+      netColVal,
+      discMode,
+      discValNum: discValParsed.num,
+      discValIsPercentLiteral: discValParsed.isPercentLiteral,
+      discAmountRp,
+      hasExplicitDiscAmountCol: idxDiscountAmount >= 0 && discAmountRp > 0,
+      row: {
         sku: cleanSku,
         barcode: cleanBarcode,
         name: cleanName,
@@ -984,10 +1239,251 @@ export function parseSpreadsheetMatrix(
         hasStockData,
         transactionCode,
         qtySold: qtySold > 0 ? qtySold : undefined,
-        totalSales: qtySold > 0 ? totalSales : undefined,
+        grossSales: qtySold > 0 ? grossSales : undefined,
+        discountAmount: 0,
+        discountType: discMode,
+        totalSales: qtySold > 0 ? grossSales : undefined,
         saleMonth,
         saleYear,
+      },
+    });
+  }
+
+  // Resolve discounts & net sales per transaction group (handles both per-item and repeated transaction-level discounts without double-discounting!)
+  const rowsByTxGroup = new Map<string, RawParsedRow[]>();
+  for (const item of rawParsedRows) {
+    const list = rowsByTxGroup.get(item.txGroupKey) ?? [];
+    list.push(item);
+    rowsByTxGroup.set(item.txGroupKey, list);
+  }
+
+  const distributeProportionally = (
+    items: RawParsedRow[],
+    targetTotal: number
+  ): number[] => {
+    const grossSum = items.reduce((s, it) => s + it.grossColVal, 0);
+    if (grossSum <= 0) return items.map(() => 0);
+    const shares = items.map((it) =>
+      Math.max(0, Math.round((it.grossColVal / grossSum) * targetTotal))
+    );
+    const diff = targetTotal - shares.reduce((a, b) => a + b, 0);
+    if (diff !== 0 && shares.length > 0) {
+      let maxIdx = 0;
+      for (let i = 1; i < items.length; i++) {
+        if (items[i].grossColVal > items[maxIdx].grossColVal) maxIdx = i;
+      }
+      shares[maxIdx] = Math.max(0, shares[maxIdx] + diff);
+    }
+    return shares;
+  };
+
+  for (const group of rowsByTxGroup.values()) {
+    const salesItems = group.filter((g) => (g.row.qtySold ?? 0) > 0);
+    if (salesItems.length === 0) continue;
+
+    const groupGrossSum = salesItems.reduce((s, it) => s + it.grossColVal, 0);
+    const allHaveNetCol = salesItems.every((it) => it.hasNetCol);
+
+    // Case 1: Explicit Net Total column exists alongside Gross Total
+    if (allHaveNetCol) {
+      const firstNet = salesItems[0].netColVal;
+      const allSameNet =
+        salesItems.length > 1 &&
+        firstNet > 0 &&
+        salesItems.every((it) => it.netColVal === firstNet);
+      const maxSingleGross = Math.max(...salesItems.map((it) => it.grossColVal));
+
+      if (allSameNet && firstNet > maxSingleGross && firstNet <= groupGrossSum) {
+        // Transaction-level Grand Total repeated on every line of the TRX
+        const distributed = distributeProportionally(salesItems, firstNet);
+        salesItems.forEach((it, idx) => {
+          const net = distributed[idx];
+          it.row.grossSales = it.grossColVal;
+          it.row.totalSales = net;
+          it.row.discountAmount = Math.max(0, it.grossColVal - net);
+        });
+        continue;
+      } else {
+        // Line-level Net Total column
+        salesItems.forEach((it) => {
+          const gross = Math.max(it.grossColVal, it.netColVal);
+          const net = Math.min(gross, it.netColVal);
+          it.row.grossSales = gross;
+          it.row.totalSales = net;
+          it.row.discountAmount = Math.max(0, gross - net);
+        });
+        continue;
+      }
+    }
+
+    // Case 2: No separate Net Total column -> compute from discount columns
+    const anyHasDiscount = salesItems.some(
+      (it) =>
+        it.discMode !== 'none' &&
+        (it.discAmountRp > 0 || it.discValNum > 0)
+    );
+    if (!anyHasDiscount) continue;
+
+    // Helper to check if grossColVal is ALREADY net (when Harga Satuan column exists)
+    const isAlreadyNetFromPrice = (
+      it: RawParsedRow,
+      expectedDisc: number
+    ): boolean => {
+      if (!it.hasPriceCol || expectedDisc <= 0) return false;
+      const fromUnit = it.row.price * (it.row.qtySold ?? 1);
+      if (fromUnit <= it.grossColVal) return false;
+      return Math.abs(fromUnit - expectedDisc - it.grossColVal) <= 500;
+    };
+
+    // Check for transaction-level repeated fixed/exact/voucher discount across >= 2 rows
+    const firstMode = salesItems[0].discMode;
+    const firstFixedVal =
+      salesItems[0].hasExplicitDiscAmountCol
+        ? salesItems[0].discAmountRp
+        : Math.round(salesItems[0].discValNum);
+
+    const isRepeatedTxFixed =
+      isSalesSheet &&
+      salesItems.length > 1 &&
+      (firstMode === 'fixed' || firstMode === 'voucher' || firstMode === 'exact') &&
+      firstFixedVal > 0 &&
+      salesItems.every((it) => {
+        const v = it.hasExplicitDiscAmountCol
+          ? it.discAmountRp
+          : Math.round(it.discValNum);
+        return it.discMode === firstMode && v === firstFixedVal;
       });
+
+    if (isRepeatedTxFixed) {
+      const targetNet =
+        firstMode === 'exact'
+          ? Math.min(groupGrossSum, Math.max(0, firstFixedVal))
+          : Math.max(0, groupGrossSum - firstFixedVal);
+      const distributed = distributeProportionally(salesItems, targetNet);
+      salesItems.forEach((it, idx) => {
+        const net = distributed[idx];
+        it.row.grossSales = it.grossColVal;
+        it.row.totalSales = net;
+        it.row.discountAmount = Math.max(0, it.grossColVal - net);
+        it.row.discountType = firstMode;
+        it.row.discountLabel =
+          firstMode === 'exact' ? 'Harga Pas' : 'Diskon Transaksi';
+      });
+      continue;
+    }
+
+    // Otherwise apply per-line discount (for 'percent', per-line == transaction-level!)
+    salesItems.forEach((it) => {
+      if (it.discMode === 'none') return;
+
+      let computedDisc = 0;
+      let label = '';
+
+      if (it.discMode === 'percent') {
+        if (it.hasExplicitDiscAmountCol && it.discAmountRp > 0) {
+          computedDisc = it.discAmountRp;
+          label =
+            it.discValNum > 0
+              ? `Diskon ${it.discValNum > 0 && it.discValNum < 1 && !it.discValIsPercentLiteral ? Math.round(it.discValNum * 100) : it.discValNum}%`
+              : 'Diskon Persen';
+        } else {
+          const pct =
+            it.discValNum > 0 && it.discValNum < 1 && !it.discValIsPercentLiteral
+              ? it.discValNum * 100
+              : Math.min(100, it.discValNum);
+          computedDisc = Math.round((it.grossColVal * pct) / 100);
+          label = pct > 0 ? `Diskon ${Number(pct.toFixed(1))}%` : '';
+        }
+      } else if (it.discMode === 'exact') {
+        const target = Math.max(0, Math.round(it.discValNum));
+        computedDisc = Math.max(0, it.grossColVal - target);
+        label = 'Harga Pas';
+      } else {
+        // fixed / voucher
+        computedDisc = it.hasExplicitDiscAmountCol
+          ? it.discAmountRp
+          : Math.round(it.discValNum);
+        label = it.discMode === 'voucher' ? 'Voucher' : 'Potongan Diskon';
+      }
+
+      if (computedDisc <= 0) return;
+
+      if (isAlreadyNetFromPrice(it, computedDisc)) {
+        // Sheet's Total Penjualan was ALREADY net; record subtotal & discount without double-deducting!
+        const fromUnit = it.row.price * (it.row.qtySold ?? 1);
+        it.row.grossSales = fromUnit;
+        it.row.discountAmount = Math.max(0, fromUnit - it.grossColVal);
+        it.row.totalSales = it.grossColVal;
+        it.row.discountType = it.discMode;
+        it.row.discountLabel = label;
+      } else {
+        const clampedDisc = Math.min(it.grossColVal, computedDisc);
+        it.row.grossSales = it.grossColVal;
+        it.row.discountAmount = clampedDisc;
+        it.row.totalSales = Math.max(0, it.grossColVal - clampedDisc);
+        it.row.discountType = it.discMode;
+        it.row.discountLabel = label;
+      }
+    });
+  }
+
+  // Deduplicate into parsedMap
+  const parsedMap = new Map<string, ImportedCatalogRow>();
+  for (const { dedupeKey, row: itemRow } of rawParsedRows) {
+    const qtySold = itemRow.qtySold ?? 0;
+    const totalSales = itemRow.totalSales ?? 0;
+    const grossSales = itemRow.grossSales ?? totalSales;
+    const discountAmount = itemRow.discountAmount ?? 0;
+
+    const prev = parsedMap.get(dedupeKey);
+    if (prev && isSalesSheet) {
+      const nextQty = (prev.qtySold ?? 0) + qtySold;
+      const nextGross = (prev.grossSales ?? prev.totalSales ?? 0) + grossSales;
+      const nextDisc = (prev.discountAmount ?? 0) + discountAmount;
+      const nextSales = (prev.totalSales ?? 0) + totalSales;
+      parsedMap.set(dedupeKey, {
+        ...prev,
+        name: prev.name || itemRow.name,
+        category:
+          prev.category !== 'Umum' ? prev.category : itemRow.category,
+        price: prev.price > 0 ? prev.price : itemRow.price,
+        qtySold: nextQty > 0 ? nextQty : undefined,
+        grossSales: nextQty > 0 ? nextGross : undefined,
+        discountAmount: nextDisc,
+        discountType:
+          prev.discountType && prev.discountType !== 'none'
+            ? prev.discountType
+            : itemRow.discountType,
+        discountLabel: prev.discountLabel || itemRow.discountLabel,
+        totalSales: nextQty > 0 ? nextSales : undefined,
+      });
+    } else if (prev) {
+      parsedMap.set(dedupeKey, {
+        ...prev,
+        name: itemRow.name || prev.name,
+        category:
+          itemRow.category !== 'Umum' ? itemRow.category : prev.category,
+        price: itemRow.price > 0 ? itemRow.price : prev.price,
+        initialStock:
+          idxInitialStock >= 0 ? itemRow.initialStock : prev.initialStock,
+        currentStock:
+          idxCurrentStock >= 0 ? itemRow.currentStock : prev.currentStock,
+        hasStockData: prev.hasStockData || itemRow.hasStockData,
+        qtySold:
+          qtySold > 0 ? (prev.qtySold ?? 0) + qtySold : prev.qtySold,
+        grossSales:
+          qtySold > 0
+            ? (prev.grossSales ?? prev.totalSales ?? 0) + grossSales
+            : prev.grossSales,
+        discountAmount:
+          qtySold > 0
+            ? (prev.discountAmount ?? 0) + discountAmount
+            : prev.discountAmount,
+        totalSales:
+          qtySold > 0 ? (prev.totalSales ?? 0) + totalSales : prev.totalSales,
+      });
+    } else {
+      parsedMap.set(dedupeKey, itemRow);
     }
   }
 
@@ -1147,10 +1643,21 @@ export function mergeSelectedTabs(
         const prev = merged.get(txLineKey);
         if (prev) {
           const nextQty = (prev.qtySold ?? 0) + (r.qtySold ?? 0);
+          const nextGross =
+            (prev.grossSales ?? prev.totalSales ?? 0) +
+            (r.grossSales ?? r.totalSales ?? 0);
+          const nextDisc = (prev.discountAmount ?? 0) + (r.discountAmount ?? 0);
           const nextSales = (prev.totalSales ?? 0) + (r.totalSales ?? 0);
           merged.set(txLineKey, {
             ...prev,
             qtySold: nextQty > 0 ? nextQty : undefined,
+            grossSales: nextQty > 0 ? nextGross : undefined,
+            discountAmount: nextDisc,
+            discountType:
+              prev.discountType && prev.discountType !== 'none'
+                ? prev.discountType
+                : r.discountType,
+            discountLabel: prev.discountLabel || r.discountLabel,
             totalSales: nextQty > 0 ? nextSales : undefined,
           });
         } else {
@@ -1188,6 +1695,10 @@ export function mergeSelectedTabs(
       );
       if (prev) {
         const nextQty = (prev.qtySold ?? 0) + (r.qtySold ?? 0);
+        const nextGross =
+          (prev.grossSales ?? prev.totalSales ?? 0) +
+          (r.grossSales ?? r.totalSales ?? 0);
+        const nextDisc = (prev.discountAmount ?? 0) + (r.discountAmount ?? 0);
         const nextSales = (prev.totalSales ?? 0) + (r.totalSales ?? 0);
         merged.set(baseKey, {
           ...prev,
@@ -1199,6 +1710,8 @@ export function mergeSelectedTabs(
           currentStock: r.hasStockData ? r.currentStock : prev.currentStock,
           hasStockData: prev.hasStockData || r.hasStockData,
           qtySold: nextQty > 0 ? nextQty : undefined,
+          grossSales: nextQty > 0 ? nextGross : undefined,
+          discountAmount: nextDisc,
           totalSales: nextQty > 0 ? nextSales : undefined,
         });
       } else {

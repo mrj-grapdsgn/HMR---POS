@@ -161,6 +161,14 @@ export interface ImportedCatalogRow {
   hasStockData?: boolean;
   transactionCode?: string;
   qtySold?: number;
+  /** Pre-discount gross subtotal for this line (before discount deduction) */
+  grossSales?: number;
+  /** Discount deducted for this line (Rupiah) */
+  discountAmount?: number;
+  /** Discount mode from spreadsheet (none/percent/fixed/exact/voucher) */
+  discountType?: DiscountMode;
+  discountLabel?: string;
+  /** Net sales total AFTER discount deduction */
   totalSales?: number;
   saleMonth?: number;
   saleYear?: number;

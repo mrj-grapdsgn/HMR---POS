@@ -155,7 +155,7 @@ export function RestockAnalyticsPanel({
     });
   }, [salesLines, selectedBranchId, selectedYear, selectedMonths]);
 
-  const filteredTxCount = useMemo(() => {
+  const filteredTransactions = useMemo(() => {
     return transactions.filter((tx) => {
       if (selectedBranchId !== 'all' && tx.branchId !== selectedBranchId) {
         return false;
@@ -170,22 +170,58 @@ export function RestockAnalyticsPanel({
         return false;
       }
       return true;
-    }).length;
+    });
   }, [transactions, selectedBranchId, selectedYear, selectedMonths]);
+
+  const filteredTxCount = filteredTransactions.length;
 
   const analytics = useMemo(() => {
     const skuMap = new Map<string, AggregatedSku>();
     let totalRevenue = 0;
+    let totalGrossRevenue = 0;
+    let totalDiscount = 0;
     let totalQty = 0;
 
+    // Build canonical net/gross/discount metrics per filtered transaction
+    const txMetricsById = new Map<
+      string,
+      { gross: number; discount: number; net: number }
+    >();
+    for (const tx of filteredTransactions) {
+      const rawSub = Math.max(0, Math.round(tx.subtotal || 0));
+      const rawDisc = Math.max(0, Math.round(tx.discountAmount || 0));
+      const rawGrand = Math.max(0, Math.round(tx.grandTotal || 0));
+      // Guard against any legacy record where grandTotal wasn't deducted by discountAmount
+      const net =
+        rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
+          ? Math.max(0, rawSub - rawDisc)
+          : rawGrand;
+      const gross = Math.max(rawSub, net + rawDisc);
+      const discount = Math.max(0, gross - net);
+      txMetricsById.set(tx.id, { gross, discount, net });
+    }
+
+    // Group filtered salesLines by transactionId so lines can be reconciled to exact net tx total
+    const linesByTx = new Map<string, SalesLine[]>();
+    const orphanLines: SalesLine[] = [];
     for (const line of filteredLines) {
-      totalRevenue += line.lineTotal;
+      if (line.transactionId && txMetricsById.has(line.transactionId)) {
+        const bucket = linesByTx.get(line.transactionId) ?? [];
+        bucket.push(line);
+        linesByTx.set(line.transactionId, bucket);
+      } else {
+        orphanLines.push(line);
+      }
+    }
+
+    const addSkuLine = (line: SalesLine, effectiveTotal: number) => {
+      totalRevenue += effectiveTotal;
       totalQty += line.qty;
       const existing = skuMap.get(line.productId);
       const liveProd = productById.get(line.productId);
       if (existing) {
         existing.qtySold += line.qty;
-        existing.totalSales += line.lineTotal;
+        existing.totalSales += effectiveTotal;
       } else {
         skuMap.set(line.productId, {
           productId: line.productId,
@@ -193,9 +229,63 @@ export function RestockAnalyticsPanel({
           name: liveProd?.name ?? line.productName,
           category: liveProd?.category ?? line.category,
           qtySold: line.qty,
-          totalSales: line.lineTotal,
+          totalSales: effectiveTotal,
         });
       }
+    };
+
+    // Process every filtered transaction anchored to its post-discount net total
+    for (const [txId, metrics] of txMetricsById.entries()) {
+      const txLines = linesByTx.get(txId);
+      if (!txLines || txLines.length === 0) {
+        totalRevenue += metrics.net;
+        totalGrossRevenue += metrics.gross;
+        totalDiscount += metrics.discount;
+        continue;
+      }
+
+      totalGrossRevenue += metrics.gross;
+      totalDiscount += metrics.discount;
+
+      const rawLinesSum = txLines.reduce((s, l) => s + l.lineTotal, 0);
+      if (Math.abs(rawLinesSum - metrics.net) <= 1) {
+        for (const line of txLines) {
+          addSkuLine(line, line.lineTotal);
+        }
+      } else if (rawLinesSum > 0) {
+        // Scale lines proportionally so SKU omset & Total Omset both match net grandTotal after discount
+        const scaled = txLines.map((l) =>
+          Math.max(0, Math.round((l.lineTotal / rawLinesSum) * metrics.net))
+        );
+        const scaledSum = scaled.reduce((a, b) => a + b, 0);
+        if (scaled.length > 0 && scaledSum !== metrics.net) {
+          let maxIdx = 0;
+          for (let i = 1; i < scaled.length; i++) {
+            if (scaled[i] > scaled[maxIdx]) maxIdx = i;
+          }
+          scaled[maxIdx] = Math.max(0, scaled[maxIdx] + (metrics.net - scaledSum));
+        }
+        txLines.forEach((line, i) => addSkuLine(line, scaled[i]));
+      } else {
+        // rawLinesSum === 0 (e.g. legacy 0-price lines) while txNet > 0: distribute by qty
+        const totalLineQty = txLines.reduce((s, l) => s + Math.max(1, l.qty), 0);
+        const distributed = txLines.map((l) =>
+          totalLineQty > 0
+            ? Math.round((Math.max(1, l.qty) / totalLineQty) * metrics.net)
+            : 0
+        );
+        const distSum = distributed.reduce((a, b) => a + b, 0);
+        if (distributed.length > 0 && distSum !== metrics.net) {
+          distributed[0] = Math.max(0, distributed[0] + (metrics.net - distSum));
+        }
+        txLines.forEach((line, i) => addSkuLine(line, distributed[i]));
+      }
+    }
+
+    // Include any orphan salesLines (whose transaction doc isn't in filteredTransactions)
+    for (const line of orphanLines) {
+      totalGrossRevenue += line.lineTotal;
+      addSkuLine(line, line.lineTotal);
     }
 
     const allSkus = Array.from(skuMap.values());
@@ -289,6 +379,8 @@ export function RestockAnalyticsPanel({
 
     return {
       totalRevenue,
+      totalGrossRevenue,
+      totalDiscount,
       totalQty,
       uniqueSkuCount: allSkus.length,
       topByQty,
@@ -306,7 +398,13 @@ export function RestockAnalyticsPanel({
       restockTotals,
       overallPctSold,
     };
-  }, [filteredLines, branchStocks, selectedBranchId, productById]);
+  }, [
+    filteredLines,
+    filteredTransactions,
+    branchStocks,
+    selectedBranchId,
+    productById,
+  ]);
 
   const activeBranchLabel =
     selectedBranchId === 'all'
@@ -518,14 +616,23 @@ export function RestockAnalyticsPanel({
       <div className="grid grid-cols-2 gap-3.5 lg:grid-cols-4">
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="text-xs font-medium text-slate-500">
-            Total Omset Penjualan
+            Total Omset Bersih
           </div>
           <div className="font-mono-num mt-1.5 text-xl font-extrabold text-slate-900">
             {formatRupiah(analytics.totalRevenue)}
           </div>
-          <div className="mt-1 text-[11px] text-slate-400">
-            Nilai bersih penjualan periode aktif
-          </div>
+          {analytics.totalDiscount > 0 ? (
+            <div className="font-mono-num mt-1 text-[11px] text-slate-500">
+              Kotor {formatRupiah(analytics.totalGrossRevenue)} ·{' '}
+              <span className="font-semibold text-rose-600">
+                Diskon -{formatRupiah(analytics.totalDiscount)}
+              </span>
+            </div>
+          ) : (
+            <div className="mt-1 text-[11px] text-slate-400">
+              Nilai bersih penjualan setelah diskon
+            </div>
+          )}
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">

@@ -149,6 +149,8 @@ export function ImportMigrationPanel({
     let hasCatalogStock = false;
     let totalQtySold = 0;
     let totalOmset = 0;
+    let totalGrossOmset = 0;
+    let totalDiscount = 0;
     for (const r of previewRows) {
       if (r.hasStockData !== false) {
         hasCatalogStock = true;
@@ -167,8 +169,18 @@ export function ImportMigrationPanel({
       }
       if ((r.qtySold ?? 0) > 0) {
         totalQtySold += r.qtySold ?? 0;
-        totalOmset +=
+        const net =
           r.totalSales !== undefined ? r.totalSales : (r.qtySold ?? 0) * r.price;
+        const gross =
+          r.grossSales !== undefined
+            ? Math.max(net, r.grossSales)
+            : r.discountAmount && r.discountAmount > 0
+              ? net + r.discountAmount
+              : net;
+        const disc = Math.max(0, gross - net);
+        totalOmset += net;
+        totalGrossOmset += gross;
+        totalDiscount += disc;
         if (r.transactionCode?.trim()) {
           txCodes.add(
             `${normalizeBranchKey(r.branchName)}::${r.transactionCode.trim().toLowerCase()}`
@@ -188,6 +200,8 @@ export function ImportMigrationPanel({
       catalogStockBySku,
       totalQtySold,
       totalOmset,
+      totalGrossOmset,
+      totalDiscount,
     };
   }, [previewRows]);
 
@@ -934,6 +948,9 @@ export function ImportMigrationPanel({
                 ['Stok', cols.currentStock],
                 ['Qty', cols.qtySold],
                 ['Total', cols.totalSales],
+                ['Tipe Diskon', cols.discountType],
+                ['Diskon', cols.discountValue],
+                ['Total Akhir', cols.netTotal],
                 ['Tanggal', cols.date],
               ].filter((entry): entry is [string, string] => Boolean(entry[1]));
 
@@ -998,7 +1015,21 @@ export function ImportMigrationPanel({
                   : ''}
                 {' · '}
                 {formatNumber(previewStats.totalQtySold)} pcs terjual ·{' '}
-                {formatRupiah(previewStats.totalOmset)} · {sourceLabel})
+                {previewStats.totalDiscount > 0 ? (
+                  <>
+                    Kotor {formatRupiah(previewStats.totalGrossOmset)} ·{' '}
+                    <span className="text-rose-600">
+                      Diskon -{formatRupiah(previewStats.totalDiscount)}
+                    </span>{' '}
+                    ·{' '}
+                    <span className="text-emerald-700">
+                      Omset Bersih {formatRupiah(previewStats.totalOmset)}
+                    </span>
+                  </>
+                ) : (
+                  formatRupiah(previewStats.totalOmset)
+                )}{' '}
+                · {sourceLabel})
               </div>
               <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-600">
                 <input
@@ -1135,8 +1166,16 @@ export function ImportMigrationPanel({
                   <th className="px-3 py-2 text-right font-semibold">
                     Terjual
                   </th>
+                  {previewStats.totalDiscount > 0 &&
+                    previewFilter !== 'catalog' && (
+                      <th className="px-3 py-2 text-right font-semibold">
+                        Diskon
+                      </th>
+                    )}
                   <th className="px-3 py-2 text-right font-semibold">
-                    Total Penjualan
+                    {previewStats.totalDiscount > 0
+                      ? 'Total Bersih'
+                      : 'Total Penjualan'}
                   </th>
                 </tr>
               </thead>
@@ -1203,6 +1242,18 @@ export function ImportMigrationPanel({
                       <td className="font-mono-num px-3 py-2 text-right text-slate-700 whitespace-nowrap">
                         {row.qtySold ? `${row.qtySold} pcs` : '—'}
                       </td>
+                      {previewStats.totalDiscount > 0 &&
+                        previewFilter !== 'catalog' && (
+                          <td className="font-mono-num px-3 py-2 text-right whitespace-nowrap">
+                            {(row.discountAmount ?? 0) > 0 ? (
+                              <span className="font-semibold text-rose-600">
+                                -{formatRupiah(row.discountAmount ?? 0)}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </td>
+                        )}
                       <td className="font-mono-num px-3 py-2 text-right font-semibold text-emerald-700 whitespace-nowrap">
                         {row.qtySold
                           ? formatRupiah(

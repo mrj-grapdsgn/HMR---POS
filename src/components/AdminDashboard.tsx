@@ -417,6 +417,27 @@ export function AdminDashboard({
     });
   }, [transactions, txBranchFilter, txMethodFilter, txSearch]);
 
+  const txSummary = useMemo(() => {
+    let grossSum = 0;
+    let discountSum = 0;
+    let netSum = 0;
+    for (const t of filteredTx) {
+      const rawSub = Math.max(0, Math.round(t.subtotal || 0));
+      const rawDisc = Math.max(0, Math.round(t.discountAmount || 0));
+      const rawGrand = Math.max(0, Math.round(t.grandTotal || 0));
+      const net =
+        rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
+          ? Math.max(0, rawSub - rawDisc)
+          : rawGrand;
+      const gross = Math.max(rawSub, net + rawDisc);
+      const disc = Math.max(0, gross - net);
+      grossSum += gross;
+      discountSum += disc;
+      netSum += net;
+    }
+    return { grossSum, discountSum, netSum };
+  }, [filteredTx]);
+
   const handleExportCsv = () => {
     const header = [
       'Invoice',
@@ -427,21 +448,32 @@ export function AdminDashboard({
       'Qty',
       'Subtotal',
       'Diskon',
-      'Total',
+      'Total Bersih',
       'Metode',
     ];
-    const rows = filteredTx.map((t) => [
-      t.invoiceNo,
-      `"${(t.branchName ?? 'Pusat').replace(/"/g, '""')}"`,
-      formatDateTime(t.createdAt),
-      `"${(t.cashierName ?? 'Admin').replace(/"/g, '""')}"`,
-      t.source ?? 'pos',
-      t.totalQty ?? 0,
-      t.subtotal,
-      t.discountAmount,
-      t.grandTotal,
-      t.paymentMethod.toUpperCase(),
-    ]);
+    const rows = filteredTx.map((t) => {
+      const rawSub = Math.max(0, Math.round(t.subtotal || 0));
+      const rawDisc = Math.max(0, Math.round(t.discountAmount || 0));
+      const rawGrand = Math.max(0, Math.round(t.grandTotal || 0));
+      const net =
+        rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
+          ? Math.max(0, rawSub - rawDisc)
+          : rawGrand;
+      const gross = Math.max(rawSub, net + rawDisc);
+      const disc = Math.max(0, gross - net);
+      return [
+        t.invoiceNo,
+        `"${(t.branchName ?? 'Pusat').replace(/"/g, '""')}"`,
+        formatDateTime(t.createdAt),
+        `"${(t.cashierName ?? 'Admin').replace(/"/g, '""')}"`,
+        t.source ?? 'pos',
+        t.totalQty ?? 0,
+        gross,
+        disc,
+        net,
+        t.paymentMethod.toUpperCase(),
+      ];
+    });
     const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -1509,6 +1541,49 @@ export function AdminDashboard({
                   </button>
                 </div>
 
+                <div className="grid grid-cols-2 gap-3 border-b border-slate-200 bg-slate-50/70 px-4 py-3 sm:grid-cols-4">
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-500">
+                      Transaksi Terfilter
+                    </div>
+                    <div className="font-mono-num text-sm font-bold text-slate-900">
+                      {formatNumber(filteredTx.length)} trx
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-500">
+                      Omset Kotor (Subtotal)
+                    </div>
+                    <div className="font-mono-num text-sm font-bold text-slate-800">
+                      {formatRupiah(txSummary.grossSum)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-500">
+                      Total Potongan Diskon
+                    </div>
+                    <div
+                      className={`font-mono-num text-sm font-bold ${
+                        txSummary.discountSum > 0
+                          ? 'text-rose-600'
+                          : 'text-slate-500'
+                      }`}
+                    >
+                      {txSummary.discountSum > 0
+                        ? `-${formatRupiah(txSummary.discountSum)}`
+                        : 'Rp 0'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-500">
+                      Total Omset Bersih
+                    </div>
+                    <div className="font-mono-num text-sm font-extrabold text-emerald-700">
+                      {formatRupiah(txSummary.netSum)}
+                    </div>
+                  </div>
+                </div>
+
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead className="border-b border-slate-200 bg-slate-50 text-[11px] text-slate-500">
@@ -1519,7 +1594,13 @@ export function AdminDashboard({
                         <th className="px-3 py-2.5 font-semibold">Kasir</th>
                         <th className="px-3 py-2.5 font-semibold">Metode</th>
                         <th className="px-3 py-2.5 text-right font-semibold">
-                          Total
+                          Subtotal
+                        </th>
+                        <th className="px-3 py-2.5 text-right font-semibold">
+                          Diskon
+                        </th>
+                        <th className="px-3 py-2.5 text-right font-semibold">
+                          Total Bersih
                         </th>
                         <th className="px-4 py-2.5 text-right font-semibold">
                           Struk
@@ -1530,50 +1611,80 @@ export function AdminDashboard({
                       {filteredTx.length === 0 ? (
                         <tr>
                           <td
-                            colSpan={7}
+                            colSpan={9}
                             className="px-4 py-10 text-center text-slate-400"
                           >
                             Tidak ada transaksi sesuai filter.
                           </td>
                         </tr>
                       ) : (
-                        filteredTx.map((tx) => (
-                          <tr key={tx.id} className="hover:bg-slate-50">
-                            <td className="font-mono-num px-4 py-2.5 font-bold text-slate-900">
-                              {tx.invoiceNo}
-                              {tx.source === 'import' && (
-                                <span className="ml-1.5 text-[10px] font-medium text-slate-400">
-                                  (Impor)
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-3 py-2.5 font-medium text-slate-700">
-                              {tx.branchName || 'Pusat'}
-                            </td>
-                            <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">
-                              {formatDateTime(tx.createdAt)}
-                            </td>
-                            <td className="px-3 py-2.5 text-slate-700">
-                              {tx.cashierName || 'Admin'}
-                            </td>
-                            <td className="px-3 py-2.5 font-semibold text-slate-700 uppercase">
-                              {tx.paymentMethod}
-                            </td>
-                            <td className="font-mono-num px-3 py-2.5 text-right font-bold text-emerald-700 whitespace-nowrap">
-                              {formatRupiah(tx.grandTotal)}
-                            </td>
-                            <td className="px-4 py-2.5 text-right">
-                              <button
-                                type="button"
-                                onClick={() => onViewReceipt(tx)}
-                                className="inline-flex h-7 items-center gap-1 rounded border border-slate-300 px-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
-                              >
-                                <ReceiptText className="h-3 w-3" />
-                                <span>Lihat</span>
-                              </button>
-                            </td>
-                          </tr>
-                        ))
+                        filteredTx.map((tx) => {
+                          const rawSub = Math.max(0, Math.round(tx.subtotal || 0));
+                          const rawDisc = Math.max(
+                            0,
+                            Math.round(tx.discountAmount || 0)
+                          );
+                          const rawGrand = Math.max(
+                            0,
+                            Math.round(tx.grandTotal || 0)
+                          );
+                          const net =
+                            rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
+                              ? Math.max(0, rawSub - rawDisc)
+                              : rawGrand;
+                          const gross = Math.max(rawSub, net + rawDisc);
+                          const disc = Math.max(0, gross - net);
+
+                          return (
+                            <tr key={tx.id} className="hover:bg-slate-50">
+                              <td className="font-mono-num px-4 py-2.5 font-bold text-slate-900">
+                                {tx.invoiceNo}
+                                {tx.source === 'import' && (
+                                  <span className="ml-1.5 text-[10px] font-medium text-slate-400">
+                                    (Impor)
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2.5 font-medium text-slate-700">
+                                {tx.branchName || 'Pusat'}
+                              </td>
+                              <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">
+                                {formatDateTime(tx.createdAt)}
+                              </td>
+                              <td className="px-3 py-2.5 text-slate-700">
+                                {tx.cashierName || 'Admin'}
+                              </td>
+                              <td className="px-3 py-2.5 font-semibold text-slate-700 uppercase">
+                                {tx.paymentMethod}
+                              </td>
+                              <td className="font-mono-num px-3 py-2.5 text-right text-slate-600 whitespace-nowrap">
+                                {formatRupiah(gross)}
+                              </td>
+                              <td className="font-mono-num px-3 py-2.5 text-right whitespace-nowrap">
+                                {disc > 0 ? (
+                                  <span className="font-semibold text-rose-600">
+                                    -{formatRupiah(disc)}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </td>
+                              <td className="font-mono-num px-3 py-2.5 text-right font-bold text-emerald-700 whitespace-nowrap">
+                                {formatRupiah(net)}
+                              </td>
+                              <td className="px-4 py-2.5 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => onViewReceipt(tx)}
+                                  className="inline-flex h-7 items-center gap-1 rounded border border-slate-300 px-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                                >
+                                  <ReceiptText className="h-3 w-3" />
+                                  <span>Lihat</span>
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
                       )}
                     </tbody>
                   </table>
