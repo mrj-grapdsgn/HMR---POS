@@ -104,9 +104,65 @@
         "updatedAt"
       ]
     },
+    "Branch": {
+      "title": "Branch",
+      "description": "Physical store branch or event booth with separate inventory and sales tracking.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "description": "Short uppercase branch code.",
+          "minLength": 1,
+          "maxLength": 24,
+          "pattern": "^[A-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Branch display name (e.g., CFD Senayan).",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "address": {
+          "type": "string",
+          "description": "Optional branch address or location note.",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the branch is active for POS transactions."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when branch was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when branch was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "code",
+        "name",
+        "address",
+        "active",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "Product": {
       "title": "Product",
-      "description": "A sellable POS product item owned by an authenticated store account.",
+      "description": "A sellable POS product item owned by an authenticated store account with dynamic category support.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -118,7 +174,7 @@
         },
         "sku": {
           "type": "string",
-          "description": "Short stock-keeping unit code.",
+          "description": "Item code / SKU (e.g., 101021002000).",
           "minLength": 1,
           "maxLength": 32,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
@@ -142,14 +198,15 @@
         },
         "image": {
           "type": "string",
-          "description": "Local asset path for product thumbnail.",
+          "description": "Optional product thumbnail URL or local path.",
           "minLength": 0,
           "maxLength": 300
         },
         "category": {
           "type": "string",
-          "description": "Product category.",
-          "enum": ["Makanan", "Minuman", "Pastry", "Combo"]
+          "description": "Dynamic product category name (e.g., Daypack, Hydropack, Celana Pendek).",
+          "minLength": 1,
+          "maxLength": 50
         },
         "createdAt": {
           "type": "string",
@@ -172,6 +229,161 @@
         "category",
         "createdAt",
         "updatedAt"
+      ]
+    },
+    "BranchStock": {
+      "title": "BranchStock",
+      "description": "Per-branch stock balance for a specific product (non-negative current stock enforced).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "branchId": {
+          "type": "string",
+          "description": "Branch document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productId": {
+          "type": "string",
+          "description": "Product document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "initialStock": {
+          "type": "number",
+          "description": "Baseline / initial stock quantity for restock sell-through analysis."
+        },
+        "currentStock": {
+          "type": "number",
+          "description": "Live available remaining stock in this branch (>= 0)."
+        },
+        "minThreshold": {
+          "type": "number",
+          "description": "Low-stock alert threshold in units."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when stock record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when stock record was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "branchId",
+        "productId",
+        "initialStock",
+        "currentStock",
+        "minThreshold",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StockLog": {
+      "title": "StockLog",
+      "description": "Immutable inventory mutation log for sales deductions, restocks, opname adjustments, and imports.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "branchId": {
+          "type": "string",
+          "description": "Branch document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "branchName": {
+          "type": "string",
+          "description": "Branch display name snapshot.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "productId": {
+          "type": "string",
+          "description": "Product document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productSku": {
+          "type": "string",
+          "description": "Product SKU snapshot.",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "productName": {
+          "type": "string",
+          "description": "Product name snapshot.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "type": {
+          "type": "string",
+          "description": "Mutation reason.",
+          "enum": ["initial", "restock", "adjustment", "sale", "import"]
+        },
+        "qtyDelta": {
+          "type": "number",
+          "description": "Signed quantity change."
+        },
+        "stockBefore": {
+          "type": "number",
+          "description": "Stock quantity before mutation."
+        },
+        "stockAfter": {
+          "type": "number",
+          "description": "Stock quantity after mutation."
+        },
+        "note": {
+          "type": "string",
+          "description": "Audit note or invoice reference.",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "actorName": {
+          "type": "string",
+          "description": "Cashier or admin name who performed the action.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the stock mutation."
+        }
+      },
+      "required": [
+        "ownerId",
+        "branchId",
+        "branchName",
+        "productId",
+        "productSku",
+        "productName",
+        "type",
+        "qtyDelta",
+        "stockBefore",
+        "stockAfter",
+        "note",
+        "actorName",
+        "createdAt"
       ]
     },
     "Voucher": {
@@ -241,7 +453,7 @@
     },
     "Transaction": {
       "title": "Transaction",
-      "description": "Immutable completed POS sale transaction header.",
+      "description": "Immutable completed POS sale or imported historical transaction header scoped to a branch and period.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -250,6 +462,19 @@
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "branchId": {
+          "type": "string",
+          "description": "Branch document ID where the transaction occurred.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "branchName": {
+          "type": "string",
+          "description": "Branch name snapshot.",
+          "minLength": 1,
+          "maxLength": 80
         },
         "invoiceNo": {
           "type": "string",
@@ -263,6 +488,19 @@
           "description": "Name of the active cashier or admin who completed the sale.",
           "minLength": 1,
           "maxLength": 80
+        },
+        "saleYear": {
+          "type": "number",
+          "description": "Calendar year (e.g., 2026) for analytics filtering."
+        },
+        "saleMonth": {
+          "type": "number",
+          "description": "Calendar month (1-12) for multi-month analytics filtering."
+        },
+        "source": {
+          "type": "string",
+          "description": "Origin of transaction record.",
+          "enum": ["pos", "import"]
         },
         "itemCount": {
           "type": "number",
@@ -316,8 +554,13 @@
       },
       "required": [
         "ownerId",
+        "branchId",
+        "branchName",
         "invoiceNo",
         "cashierName",
+        "saleYear",
+        "saleMonth",
+        "source",
         "itemCount",
         "totalQty",
         "subtotal",
@@ -391,6 +634,112 @@
         "lineTotal",
         "createdAt"
       ]
+    },
+    "SalesLine": {
+      "title": "SalesLine",
+      "description": "Immutable SKU-level sales record atomically tied to a transaction for fast multi-branch and multi-month Top 10 and restock analytics.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "transactionId": {
+          "type": "string",
+          "description": "Parent transaction document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "branchId": {
+          "type": "string",
+          "description": "Branch document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "branchName": {
+          "type": "string",
+          "description": "Branch display name snapshot.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "productId": {
+          "type": "string",
+          "description": "Product document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productSku": {
+          "type": "string",
+          "description": "Product SKU / item code snapshot.",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "productName": {
+          "type": "string",
+          "description": "Product name snapshot.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "category": {
+          "type": "string",
+          "description": "Product category snapshot.",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "qty": {
+          "type": "number",
+          "description": "Quantity sold."
+        },
+        "unitPrice": {
+          "type": "number",
+          "description": "Unit price in IDR."
+        },
+        "lineTotal": {
+          "type": "number",
+          "description": "Net sales value for this line in IDR."
+        },
+        "saleYear": {
+          "type": "number",
+          "description": "Calendar year (2000-2100)."
+        },
+        "saleMonth": {
+          "type": "number",
+          "description": "Calendar month (1-12)."
+        },
+        "source": {
+          "type": "string",
+          "description": "Record origin.",
+          "enum": ["pos", "import"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of sale."
+        }
+      },
+      "required": [
+        "ownerId",
+        "transactionId",
+        "branchId",
+        "branchName",
+        "productId",
+        "productSku",
+        "productName",
+        "category",
+        "qty",
+        "unitPrice",
+        "lineTotal",
+        "saleYear",
+        "saleMonth",
+        "source",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -402,9 +751,21 @@
       "schema": { "$ref": "#/entities/StaffAccount" },
       "description": "Admin and cashier staff accounts managed in the Admin Dashboard."
     },
+    "/branches/{branchId}": {
+      "schema": { "$ref": "#/entities/Branch" },
+      "description": "Store branches (e.g. CFD Senayan) scoped per ownerId."
+    },
     "/products/{productId}": {
       "schema": { "$ref": "#/entities/Product" },
-      "description": "Store product catalog scoped per authenticated ownerId."
+      "description": "Master product catalog with dynamic categories scoped per ownerId."
+    },
+    "/branchStocks/{stockId}": {
+      "schema": { "$ref": "#/entities/BranchStock" },
+      "description": "Per-branch stock balance per product with non-negative enforcement."
+    },
+    "/stockLogs/{logId}": {
+      "schema": { "$ref": "#/entities/StockLog" },
+      "description": "Immutable stock mutation audit ledger per ownerId."
     },
     "/vouchers/{voucherId}": {
       "schema": { "$ref": "#/entities/Voucher" },
@@ -412,11 +773,15 @@
     },
     "/transactions/{transactionId}": {
       "schema": { "$ref": "#/entities/Transaction" },
-      "description": "Immutable completed POS sales ledger headers scoped per ownerId."
+      "description": "Immutable completed POS and imported sales ledger headers scoped per ownerId."
     },
     "/transactions/{transactionId}/items/{itemId}": {
       "schema": { "$ref": "#/entities/TransactionItem" },
       "description": "Immutable line items subcollection atomically bound to a parent transaction."
+    },
+    "/salesLines/{lineId}": {
+      "schema": { "$ref": "#/entities/SalesLine" },
+      "description": "Immutable SKU-level sales lines atomically bound to a transaction for fast Top 10 & Restock analytics."
     }
   }
 }

@@ -4,6 +4,8 @@ export type PaymentMethod = 'cash' | 'qris' | 'transfer';
 
 export type StaffRole = 'admin' | 'kasir';
 
+export type StockLogType = 'initial' | 'restock' | 'adjustment' | 'sale' | 'import';
+
 export interface UserProfile {
   ownerId: string;
   displayName: string;
@@ -22,6 +24,16 @@ export interface StaffAccount {
   createdAt?: string;
 }
 
+export interface Branch {
+  id: string;
+  ownerId: string;
+  code: string;
+  name: string;
+  address: string;
+  active: boolean;
+  createdAt?: string;
+}
+
 export interface Product {
   id: string;
   sku: string;
@@ -29,11 +41,60 @@ export interface Product {
   name: string;
   price: number;
   image: string;
-  category: 'Makanan' | 'Minuman' | 'Pastry' | 'Combo';
+  category: string;
+}
+
+export interface BranchStock {
+  id: string;
+  ownerId: string;
+  branchId: string;
+  productId: string;
+  initialStock: number;
+  currentStock: number;
+  minThreshold: number;
+  updatedAt?: string;
+}
+
+export interface StockLog {
+  id: string;
+  ownerId: string;
+  branchId: string;
+  branchName: string;
+  productId: string;
+  productSku: string;
+  productName: string;
+  type: StockLogType;
+  qtyDelta: number;
+  stockBefore: number;
+  stockAfter: number;
+  note: string;
+  actorName: string;
+  createdAt: string;
+}
+
+export interface SalesLine {
+  id: string;
+  ownerId: string;
+  transactionId: string;
+  branchId: string;
+  branchName: string;
+  productId: string;
+  productSku: string;
+  productName: string;
+  category: string;
+  qty: number;
+  unitPrice: number;
+  lineTotal: number;
+  saleYear: number;
+  saleMonth: number;
+  source: 'pos' | 'import';
+  createdAt: string;
 }
 
 export interface CartItem {
   productId: string;
+  sku?: string;
+  category?: string;
   name: string;
   unitPrice: number;
   qty: number;
@@ -69,8 +130,13 @@ export interface SimpleTotals {
 
 export interface SimpleTransaction {
   id: string;
+  branchId?: string;
+  branchName?: string;
   invoiceNo: string;
   cashierName?: string;
+  saleYear?: number;
+  saleMonth?: number;
+  source?: 'pos' | 'import';
   items: CartItem[];
   totalQty?: number;
   subtotal: number;
@@ -81,4 +147,19 @@ export interface SimpleTransaction {
   amountPaid: number;
   change: number;
   createdAt: string;
+}
+
+export interface ImportedCatalogRow {
+  sku: string;
+  barcode: string;
+  name: string;
+  category: string;
+  price: number;
+  branchName: string;
+  initialStock: number;
+  currentStock: number;
+  qtySold?: number;
+  totalSales?: number;
+  saleMonth?: number;
+  saleYear?: number;
 }

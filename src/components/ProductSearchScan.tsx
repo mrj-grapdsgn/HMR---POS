@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   CameraOff,
   CheckCircle2,
   ScanBarcode,
@@ -11,9 +12,11 @@ import { formatRupiah } from '../utils/format';
 
 interface ProductSearchScanProps {
   products: Product[];
+  stockByProductId: Record<string, number>;
+  activeBranchName?: string;
   query: string;
   onQueryChange: (q: string) => void;
-  onSelectProduct: (product: Product) => void;
+  onSelectProduct: (product: Product) => boolean;
 }
 
 interface BarcodeDetectorLike {
@@ -32,6 +35,8 @@ declare global {
 
 export function ProductSearchScan({
   products,
+  stockByProductId,
+  activeBranchName,
   query,
   onQueryChange,
   onSelectProduct,
@@ -39,19 +44,23 @@ export function ProductSearchScan({
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [highlightedIdx, setHighlightedIdx] = useState(0);
   const [cameraOpen, setCameraOpen] = useState(false);
-  const [scanNotice, setScanNotice] = useState<string | null>(null);
+  const [scanNotice, setScanNotice] = useState<{
+    text: string;
+    tone: 'ok' | 'error';
+  } | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return products.slice(0, 6);
+    if (!q) return products.slice(0, 8);
     return products.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
         p.sku.toLowerCase().includes(q) ||
-        p.barcode.toLowerCase().includes(q)
+        p.barcode.toLowerCase().includes(q) ||
+        p.category.toLowerCase().includes(q)
     );
   }, [products, query]);
 
@@ -61,7 +70,7 @@ export function ProductSearchScan({
 
   useEffect(() => {
     if (!scanNotice) return;
-    const t = setTimeout(() => setScanNotice(null), 2200);
+    const t = setTimeout(() => setScanNotice(null), 2600);
     return () => clearTimeout(t);
   }, [scanNotice]);
 
@@ -79,10 +88,25 @@ export function ProductSearchScan({
   }, []);
 
   const pickProduct = (product: Product) => {
-    onSelectProduct(product);
+    const avail = stockByProductId[product.id] ?? 0;
+    if (avail <= 0) {
+      setScanNotice({
+        text: `Stok "${product.name}" habis di ${activeBranchName || 'cabang aktif'}`,
+        tone: 'error',
+      });
+      return;
+    }
+    const added = onSelectProduct(product);
+    if (!added) {
+      setScanNotice({
+        text: `Jumlah keranjang sudah mencapai sisa stok (${avail} pcs)`,
+        tone: 'error',
+      });
+      return;
+    }
     onQueryChange('');
     setDropdownOpen(false);
-    setScanNotice(`${product.name} ditambahkan`);
+    setScanNotice({ text: `${product.name} ditambahkan`, tone: 'ok' });
     inputRef.current?.focus();
   };
 
@@ -106,7 +130,6 @@ export function ProductSearchScan({
       const raw = query.trim().toLowerCase();
       if (!raw) return;
 
-      // Exact barcode or SKU match takes priority (for USB barcode scanners)
       const exact = products.find(
         (p) =>
           p.barcode.toLowerCase() === raw || p.sku.toLowerCase() === raw
@@ -136,8 +159,8 @@ export function ProductSearchScan({
 
   return (
     <div ref={containerRef} className="relative w-full">
-      {/* Label matching reference image */}
-      <div className="mb-1.5 flex items-center justify-between">
+      {/* Label */}
+      <div className="mb-1.5 flex items-center justify-between gap-2">
         <label
           htmlFor="cari-scan-barang"
           className="text-[11px] font-bold tracking-wider text-slate-500 uppercase"
@@ -145,16 +168,23 @@ export function ProductSearchScan({
           CARI / SCAN BARANG
         </label>
         {scanNotice && (
-          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
-            <CheckCircle2 className="h-3 w-3" />
-            {scanNotice}
+          <span
+            className={`inline-flex items-center gap-1 text-[11px] font-semibold ${
+              scanNotice.tone === 'error' ? 'text-rose-600' : 'text-emerald-600'
+            }`}
+          >
+            {scanNotice.tone === 'error' ? (
+              <AlertCircle className="h-3 w-3 shrink-0" />
+            ) : (
+              <CheckCircle2 className="h-3 w-3 shrink-0" />
+            )}
+            <span className="truncate">{scanNotice.text}</span>
           </span>
         )}
       </div>
 
-      {/* Segmented Search/Scan Control matching screenshot */}
+      {/* Segmented Search/Scan Control */}
       <div className="flex h-11 w-full overflow-hidden rounded-lg border border-slate-700/80 bg-[#141E27] shadow-sm transition-all focus-within:border-[#00C4A7] focus-within:ring-2 focus-within:ring-[#00C4A7]/25">
-        {/* Left Barcode Slot */}
         <button
           type="button"
           onClick={() => {
@@ -167,7 +197,6 @@ export function ProductSearchScan({
           <ScanBarcode className="h-4.5 w-4.5" />
         </button>
 
-        {/* Middle Search / Barcode Input */}
         <div className="relative flex flex-1 items-center">
           <input
             ref={inputRef}
@@ -180,7 +209,7 @@ export function ProductSearchScan({
               setDropdownOpen(true);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Ketik/Scan Barang..."
+            placeholder="Ketik/Scan Kode Item atau Nama Barang..."
             autoComplete="off"
             className="h-full w-full bg-transparent px-3 text-sm font-medium text-white placeholder:text-slate-400 focus:outline-none"
           />
@@ -199,7 +228,6 @@ export function ProductSearchScan({
           )}
         </div>
 
-        {/* Right Camera Scan Button */}
         <button
           type="button"
           onClick={() => setCameraOpen(true)}
@@ -212,26 +240,33 @@ export function ProductSearchScan({
 
       {/* Instant Autocomplete Dropdown */}
       {dropdownOpen && (
-        <div className="pos-scroll absolute top-full right-0 left-0 z-40 mt-1.5 max-h-64 overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-xl">
+        <div className="pos-scroll absolute top-full right-0 left-0 z-40 mt-1.5 max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-xl">
           {matches.length === 0 ? (
             <div className="px-3.5 py-4 text-center text-xs text-slate-500">
               Barang &ldquo;{query}&rdquo; tidak ditemukan. Coba nama produk,
-              SKU, atau kode barcode.
+              Kode Item, atau barcode.
             </div>
           ) : (
             matches.map((p, idx) => {
               const active = idx === highlightedIdx;
+              const stock = stockByProductId[p.id] ?? 0;
+              const outOfStock = stock <= 0;
               return (
                 <button
                   key={p.id}
                   type="button"
+                  disabled={outOfStock}
                   onMouseEnter={() => setHighlightedIdx(idx)}
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    pickProduct(p);
+                    if (!outOfStock) pickProduct(p);
                   }}
                   className={`flex w-full items-center justify-between gap-2.5 px-3 py-2 text-left transition-colors ${
-                    active ? 'bg-sky-50' : 'hover:bg-slate-50'
+                    outOfStock
+                      ? 'cursor-not-allowed bg-slate-50/70 opacity-60'
+                      : active
+                        ? 'bg-sky-50'
+                        : 'hover:bg-slate-50'
                   }`}
                 >
                   <div className="flex min-w-0 items-center gap-2.5">
@@ -252,7 +287,18 @@ export function ProductSearchScan({
                         {p.name}
                       </div>
                       <div className="font-mono-num text-[11px] text-slate-500">
-                        {p.barcode} · {p.sku}
+                        {p.sku} · {p.category} ·{' '}
+                        <span
+                          className={
+                            outOfStock
+                              ? 'font-bold text-rose-600'
+                              : stock <= 2
+                                ? 'font-bold text-amber-600'
+                                : 'font-semibold text-emerald-700'
+                          }
+                        >
+                          {outOfStock ? 'Stok Habis (0)' : `Sisa ${stock} pcs`}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -270,6 +316,7 @@ export function ProductSearchScan({
       {cameraOpen && (
         <CameraScannerModal
           products={products}
+          stockByProductId={stockByProductId}
           onDetected={handleCameraDetected}
           onClose={() => setCameraOpen(false)}
         />
@@ -280,10 +327,12 @@ export function ProductSearchScan({
 
 function CameraScannerModal({
   products,
+  stockByProductId,
   onDetected,
   onClose,
 }: {
   products: Product[];
+  stockByProductId: Record<string, number>;
   onDetected: (code: string) => void;
   onClose: () => void;
 }) {
@@ -373,7 +422,6 @@ function CameraScannerModal({
           </button>
         </div>
 
-        {/* Camera Viewport */}
         <div className="relative aspect-[16/10] w-full overflow-hidden bg-slate-950">
           {cameraError ? (
             <div className="flex h-full flex-col items-center justify-center px-6 text-center text-slate-300">
@@ -388,7 +436,6 @@ function CameraScannerModal({
                 playsInline
                 className="h-full w-full object-cover"
               />
-              {/* Scanning Frame Overlay */}
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <div className="relative h-28 w-56 rounded-lg border-2 border-[#00D1B2]/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]">
                   <div className="absolute top-1/2 right-2 left-2 h-0.5 bg-[#00D1B2]" />
@@ -404,32 +451,36 @@ function CameraScannerModal({
           )}
         </div>
 
-        {/* Quick-Scan Barcode List */}
         <div className="pos-scroll max-h-56 overflow-y-auto p-3.5">
           <div className="mb-2 text-[11px] font-bold tracking-wider text-slate-400 uppercase">
             Simulasi Scan Barcode Cepat
           </div>
           <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-            {products.slice(0, 8).map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => onDetected(p.barcode)}
-                className="flex items-center justify-between rounded-lg border border-slate-700/80 bg-[#1B2834] px-2.5 py-2 text-left transition-colors hover:border-[#00C4A7] hover:bg-[#1F3140]"
-              >
-                <div className="min-w-0 pr-2">
-                  <div className="truncate text-xs font-semibold text-white">
-                    {p.name}
+            {products.slice(0, 8).map((p) => {
+              const stock = stockByProductId[p.id] ?? 0;
+              const disabled = stock <= 0;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => onDetected(p.barcode)}
+                  className="flex items-center justify-between rounded-lg border border-slate-700/80 bg-[#1B2834] px-2.5 py-2 text-left transition-colors hover:border-[#00C4A7] hover:bg-[#1F3140] disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <div className="min-w-0 pr-2">
+                    <div className="truncate text-xs font-semibold text-white">
+                      {p.name}
+                    </div>
+                    <div className="font-mono-num text-[10px] text-[#00D1B2]">
+                      {p.barcode} · {disabled ? 'Habis' : `${stock} pcs`}
+                    </div>
                   </div>
-                  <div className="font-mono-num text-[10px] text-[#00D1B2]">
-                    {p.barcode}
-                  </div>
-                </div>
-                <span className="font-mono-num shrink-0 text-[11px] font-bold text-slate-200">
-                  {formatRupiah(p.price)}
-                </span>
-              </button>
-            ))}
+                  <span className="font-mono-num shrink-0 text-[11px] font-bold text-slate-200">
+                    {formatRupiah(p.price)}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>

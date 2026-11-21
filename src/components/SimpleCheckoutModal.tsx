@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import {
+  AlertCircle,
   Banknote,
   CheckCircle2,
   Landmark,
+  Loader2,
   Printer,
   QrCode,
   ReceiptText,
@@ -13,24 +15,29 @@ import { formatDateTime, formatNumber, formatRupiah } from '../utils/format';
 
 interface CheckoutModalProps {
   totals: SimpleTotals;
+  branchName?: string;
   onClose: () => void;
-  onConfirm: (method: PaymentMethod, amountPaid: number) => void;
+  onConfirm: (method: PaymentMethod, amountPaid: number) => Promise<void>;
 }
 
 export function SimpleCheckoutModal({
   totals,
+  branchName,
   onClose,
   onConfirm,
 }: CheckoutModalProps) {
   const [method, setMethod] = useState<PaymentMethod>('cash');
   const [paidStr, setPaidStr] = useState(String(totals.grandTotal));
+  const [submitting, setSubmitting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const paidAmount =
     method === 'cash'
       ? Math.max(0, parseInt(paidStr || '0', 10) || 0)
       : totals.grandTotal;
   const change = Math.max(0, paidAmount - totals.grandTotal);
-  const canConfirm = method !== 'cash' || paidAmount >= totals.grandTotal;
+  const canConfirm =
+    !submitting && (method !== 'cash' || paidAmount >= totals.grandTotal);
 
   const quickCash = Array.from(
     new Set([
@@ -43,13 +50,37 @@ export function SimpleCheckoutModal({
     .filter((v) => v >= totals.grandTotal)
     .slice(0, 4);
 
+  const handleConfirmClick = async () => {
+    setErrorMsg(null);
+    setSubmitting(true);
+    try {
+      await onConfirm(method, paidAmount);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'Gagal menyelesaikan transaksi. Periksa sisa stok cabang.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 backdrop-blur-[1px]">
       <div className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl">
         <div className="flex items-center justify-between bg-[#1B8EE6] px-5 py-3.5 text-white">
-          <h2 className="text-sm font-bold">Konfirmasi Pembayaran</h2>
+          <div>
+            <h2 className="text-sm font-bold">Konfirmasi Pembayaran</h2>
+            {branchName && (
+              <p className="text-[11px] text-white/85">
+                Cabang: {branchName} · Stok terpotong otomatis
+              </p>
+            )}
+          </div>
           <button
             type="button"
+            disabled={submitting}
             onClick={onClose}
             aria-label="Tutup"
             className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white/15"
@@ -62,7 +93,7 @@ export function SimpleCheckoutModal({
           {/* Total Summary */}
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-center">
             <div className="text-xs font-semibold text-slate-500">
-              Total Pembayaran ({totals.totalQty} item)
+              Total Pembayaran ({totals.totalQty} pcs)
             </div>
             <div className="font-mono-num mt-1 text-3xl font-extrabold text-slate-900">
               {formatRupiah(totals.grandTotal)}
@@ -85,9 +116,21 @@ export function SimpleCheckoutModal({
             <div className="grid grid-cols-3 gap-2">
               {(
                 [
-                  { id: 'cash', label: 'Tunai', icon: <Banknote className="h-4 w-4" /> },
-                  { id: 'qris', label: 'QRIS', icon: <QrCode className="h-4 w-4" /> },
-                  { id: 'transfer', label: 'Transfer', icon: <Landmark className="h-4 w-4" /> },
+                  {
+                    id: 'cash',
+                    label: 'Tunai',
+                    icon: <Banknote className="h-4 w-4" />,
+                  },
+                  {
+                    id: 'qris',
+                    label: 'QRIS',
+                    icon: <QrCode className="h-4 w-4" />,
+                  },
+                  {
+                    id: 'transfer',
+                    label: 'Transfer',
+                    icon: <Landmark className="h-4 w-4" />,
+                  },
                 ] as const
               ).map((m) => (
                 <button
@@ -152,11 +195,19 @@ export function SimpleCheckoutModal({
               </div>
             </div>
           )}
+
+          {errorMsg && (
+            <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs font-semibold text-rose-700">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{errorMsg}</span>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3.5">
           <button
             type="button"
+            disabled={submitting}
             onClick={onClose}
             className="h-10 rounded-lg border border-slate-300 bg-white px-4 text-xs font-semibold text-slate-700 hover:bg-slate-50"
           >
@@ -165,11 +216,17 @@ export function SimpleCheckoutModal({
           <button
             type="button"
             disabled={!canConfirm}
-            onClick={() => onConfirm(method, paidAmount)}
+            onClick={() => void handleConfirmClick()}
             className="flex h-10 items-center gap-1.5 rounded-lg bg-[#4CAF50] px-5 text-xs font-bold text-white hover:bg-[#43A047] disabled:cursor-not-allowed disabled:bg-slate-300"
           >
-            <CheckCircle2 className="h-4 w-4" />
-            <span>Selesaikan Transaksi</span>
+            {submitting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4" />
+            )}
+            <span>
+              {submitting ? 'Memproses...' : 'Selesaikan Transaksi'}
+            </span>
           </button>
         </div>
       </div>
@@ -210,6 +267,11 @@ export function SimpleReceiptModal({
               <div className="text-sm font-bold text-slate-900">
                 {storeName}
               </div>
+              {transaction.branchName && (
+                <div className="mt-0.5 text-[11px] font-semibold text-slate-700">
+                  Cabang: {transaction.branchName}
+                </div>
+              )}
               <div className="mt-0.5 text-[11px] text-slate-500">
                 {transaction.invoiceNo} · {formatDateTime(transaction.createdAt)}
               </div>
@@ -343,11 +405,16 @@ export function SimpleHistoryModal({
                 <div>
                   <div className="text-sm font-bold text-slate-900">
                     {tx.invoiceNo}
+                    {tx.branchName && (
+                      <span className="ml-1.5 text-xs font-medium text-slate-500">
+                        · {tx.branchName}
+                      </span>
+                    )}
                   </div>
                   <div className="mt-0.5 text-xs text-slate-500">
                     {formatDateTime(tx.createdAt)} ·{' '}
                     {tx.totalQty ?? tx.items.reduce((s, i) => s + i.qty, 0)}{' '}
-                    item ·{' '}
+                    pcs ·{' '}
                     <span className="font-semibold uppercase">
                       {tx.paymentMethod}
                     </span>

@@ -62,6 +62,23 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidBranch(data) {
+      return data.keys().hasAll([
+          'ownerId', 'code', 'name', 'address', 'active', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'code', 'name', 'address', 'active', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.code is string && data.code.size() >= 1 && data.code.size() <= 24 && data.code.matches('^[A-Z0-9_\\-]+$')
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.address is string && data.address.size() <= 160
+        && data.active is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidProduct(data) {
       return data.keys().hasAll([
           'ownerId', 'sku', 'barcode', 'name', 'price', 'image', 'category', 'createdAt', 'updatedAt'
@@ -76,9 +93,52 @@ service cloud.firestore {
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
         && data.price is number && data.price >= 0 && data.price <= 1000000000
         && data.image is string && data.image.size() <= 300
-        && data.category is string && data.category in ['Makanan', 'Minuman', 'Pastry', 'Combo']
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 50
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    function isValidBranchStock(data) {
+      return data.keys().hasAll([
+          'ownerId', 'branchId', 'productId', 'initialStock', 'currentStock', 'minThreshold', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'branchId', 'productId', 'initialStock', 'currentStock', 'minThreshold', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.branchId)
+        && isValidId(data.productId)
+        && data.initialStock is number && data.initialStock >= 0 && data.initialStock <= 1000000
+        && data.currentStock is number && data.currentStock >= 0 && data.currentStock <= 1000000
+        && data.minThreshold is number && data.minThreshold >= 0 && data.minThreshold <= 100000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStockLog(data) {
+      return data.keys().hasAll([
+          'ownerId', 'branchId', 'branchName', 'productId', 'productSku', 'productName',
+          'type', 'qtyDelta', 'stockBefore', 'stockAfter', 'note', 'actorName', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'branchId', 'branchName', 'productId', 'productSku', 'productName',
+          'type', 'qtyDelta', 'stockBefore', 'stockAfter', 'note', 'actorName', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.branchId)
+        && data.branchName is string && data.branchName.size() >= 1 && data.branchName.size() <= 80
+        && isValidId(data.productId)
+        && data.productSku is string && data.productSku.size() >= 1 && data.productSku.size() <= 32
+        && data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 100
+        && data.type is string && data.type in ['initial', 'restock', 'adjustment', 'sale', 'import']
+        && data.qtyDelta is number && data.qtyDelta >= -1000000 && data.qtyDelta <= 1000000
+        && data.stockBefore is number && data.stockBefore >= 0 && data.stockBefore <= 1000000
+        && data.stockAfter is number && data.stockAfter >= 0 && data.stockAfter <= 1000000
+        && data.note is string && data.note.size() <= 160
+        && data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 80
+        && data.createdAt is timestamp;
     }
 
     function isValidVoucher(data) {
@@ -103,19 +163,26 @@ service cloud.firestore {
 
     function isValidTransaction(data) {
       return data.keys().hasAll([
-          'ownerId', 'invoiceNo', 'cashierName', 'itemCount', 'totalQty', 'subtotal', 'discountMode',
+          'ownerId', 'branchId', 'branchName', 'invoiceNo', 'cashierName', 'saleYear', 'saleMonth', 'source',
+          'itemCount', 'totalQty', 'subtotal', 'discountMode',
           'discountAmount', 'adjustmentLabel', 'grandTotal', 'paymentMethod',
           'amountPaid', 'change', 'createdAt'
         ])
         && data.keys().hasOnly([
-          'ownerId', 'invoiceNo', 'cashierName', 'itemCount', 'totalQty', 'subtotal', 'discountMode',
+          'ownerId', 'branchId', 'branchName', 'invoiceNo', 'cashierName', 'saleYear', 'saleMonth', 'source',
+          'itemCount', 'totalQty', 'subtotal', 'discountMode',
           'discountAmount', 'adjustmentLabel', 'grandTotal', 'paymentMethod',
           'amountPaid', 'change', 'createdAt'
         ])
         && isValidId(data.ownerId)
         && data.ownerId == request.auth.uid
+        && isValidId(data.branchId)
+        && data.branchName is string && data.branchName.size() >= 1 && data.branchName.size() <= 80
         && data.invoiceNo is string && data.invoiceNo.size() >= 3 && data.invoiceNo.size() <= 32 && data.invoiceNo.matches('^[a-zA-Z0-9_\\-]+$')
         && data.cashierName is string && data.cashierName.size() >= 1 && data.cashierName.size() <= 80
+        && data.saleYear is number && data.saleYear >= 2000 && data.saleYear <= 2100
+        && data.saleMonth is number && data.saleMonth >= 1 && data.saleMonth <= 12
+        && data.source is string && data.source in ['pos', 'import']
         && data.itemCount is number && data.itemCount >= 1 && data.itemCount <= 500
         && data.totalQty is number && data.totalQty >= 1 && data.totalQty <= 10000
         && data.subtotal is number && data.subtotal >= 0 && data.subtotal <= 1000000000
@@ -145,6 +212,33 @@ service cloud.firestore {
         && data.unitPrice is number && data.unitPrice >= 0 && data.unitPrice <= 1000000000
         && data.qty is number && data.qty >= 1 && data.qty <= 10000
         && data.lineTotal is number && data.lineTotal >= 0 && data.lineTotal <= 1000000000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSalesLine(data) {
+      return data.keys().hasAll([
+          'ownerId', 'transactionId', 'branchId', 'branchName', 'productId', 'productSku', 'productName',
+          'category', 'qty', 'unitPrice', 'lineTotal', 'saleYear', 'saleMonth', 'source', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'transactionId', 'branchId', 'branchName', 'productId', 'productSku', 'productName',
+          'category', 'qty', 'unitPrice', 'lineTotal', 'saleYear', 'saleMonth', 'source', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.transactionId)
+        && isValidId(data.branchId)
+        && data.branchName is string && data.branchName.size() >= 1 && data.branchName.size() <= 80
+        && isValidId(data.productId)
+        && data.productSku is string && data.productSku.size() >= 1 && data.productSku.size() <= 32
+        && data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 100
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 50
+        && data.qty is number && data.qty >= 1 && data.qty <= 10000
+        && data.unitPrice is number && data.unitPrice >= 0 && data.unitPrice <= 1000000000
+        && data.lineTotal is number && data.lineTotal >= 0 && data.lineTotal <= 1000000000
+        && data.saleYear is number && data.saleYear >= 2000 && data.saleYear <= 2100
+        && data.saleMonth is number && data.saleMonth >= 1 && data.saleMonth <= 12
+        && data.source is string && data.source in ['pos', 'import']
         && data.createdAt is timestamp;
     }
 
@@ -201,6 +295,31 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(staffId) && isOwner(existing().ownerId);
     }
 
+    // ---------- Branches Collection ----------
+    match /branches/{branchId} {
+      allow get: if isSignedIn() && isValidId(branchId) && isOwner(existing().ownerId);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && isValidId(branchId)
+        && isValidBranch(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(branchId)
+        && isValidBranch(incoming())
+        && isOwner(existing().ownerId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'code', 'name', 'address', 'active', 'updatedAt'
+        ]);
+
+      allow delete: if isSignedIn() && isValidId(branchId) && isOwner(existing().ownerId);
+    }
+
     // ---------- Products Collection ----------
     match /products/{productId} {
       allow get: if isSignedIn() && isValidId(productId) && isOwner(existing().ownerId);
@@ -224,6 +343,58 @@ service cloud.firestore {
         ]);
 
       allow delete: if isSignedIn() && isValidId(productId) && isOwner(existing().ownerId);
+    }
+
+    // ---------- Branch Stocks Collection ----------
+    match /branchStocks/{stockId} {
+      allow get: if isSignedIn() && isValidId(stockId) && isOwner(existing().ownerId);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && isValidId(stockId)
+        && isValidBranchStock(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/branches/$(incoming().branchId))
+        && getAfter(/databases/$(database)/documents/branches/$(incoming().branchId)).data.ownerId == request.auth.uid
+        && existsAfter(/databases/$(database)/documents/products/$(incoming().productId))
+        && getAfter(/databases/$(database)/documents/products/$(incoming().productId)).data.ownerId == request.auth.uid;
+
+      allow update: if isSignedIn()
+        && isValidId(stockId)
+        && isValidBranchStock(incoming())
+        && isOwner(existing().ownerId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().branchId == existing().branchId
+        && incoming().productId == existing().productId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: POS sale deduction
+          (incoming().currentStock < existing().currentStock
+            && incoming().initialStock == existing().initialStock
+            && incoming().diff(existing()).affectedKeys().hasOnly(['currentStock', 'updatedAt']))
+          ||
+          // Action 2: Admin restock / opname / threshold update
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'initialStock', 'currentStock', 'minThreshold', 'updatedAt'
+          ])
+        );
+
+      allow delete: if isSignedIn() && isValidId(stockId) && isOwner(existing().ownerId);
+    }
+
+    // ---------- Stock Mutation Logs (Immutable Ledger) ----------
+    match /stockLogs/{logId} {
+      allow get: if isSignedIn() && isValidId(logId) && isOwner(existing().ownerId);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && isValidId(logId)
+        && isValidStockLog(incoming())
+        && incoming().createdAt == request.time;
+
+      allow update, delete: if false;
     }
 
     // ---------- Vouchers Collection ----------
@@ -286,6 +457,21 @@ service cloud.firestore {
 
         allow update, delete: if false;
       }
+    }
+
+    // ---------- Sales Lines Analytics Collection (Immutable Ledger) ----------
+    match /salesLines/{lineId} {
+      allow get: if isSignedIn() && isValidId(lineId) && isOwner(existing().ownerId);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && isValidId(lineId)
+        && isValidSalesLine(incoming())
+        && incoming().createdAt == request.time
+        && existsAfter(/databases/$(database)/documents/transactions/$(incoming().transactionId))
+        && getAfter(/databases/$(database)/documents/transactions/$(incoming().transactionId)).data.ownerId == request.auth.uid;
+
+      allow update, delete: if false;
     }
   }
 }

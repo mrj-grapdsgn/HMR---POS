@@ -7,22 +7,35 @@ import {
   getDocs,
   onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { PRODUCTS, VOUCHERS } from '../data/catalog';
+import {
+  DEFAULT_BRANCH,
+  HIKEMORE_SEED_ROWS,
+  LEGACY_CAFE_CATEGORIES,
+  LEGACY_CAFE_SKUS,
+  VOUCHERS,
+} from '../data/catalog';
 import { OperationType, db, handleFirestoreError } from '../firebase';
 import {
+  Branch,
+  BranchStock,
   CartItem,
   DiscountMode,
+  ImportedCatalogRow,
   PaymentMethod,
   Product,
+  SalesLine,
   SimpleTransaction,
   StaffAccount,
   StaffRole,
+  StockLog,
+  StockLogType,
   UserProfile,
   VoucherDef,
 } from '../types/pos';
@@ -32,15 +45,23 @@ const ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const SKU_MAX = 32;
 const BARCODE_MAX = 64;
 const NAME_MAX = 100;
+const CATEGORY_MAX = 50;
+const BRANCH_NAME_MAX = 80;
+const BRANCH_CODE_MAX = 24;
+const ADDRESS_MAX = 160;
+const NOTE_MAX = 160;
 const DISPLAY_NAME_MAX = 80;
 const USERNAME_MAX = 40;
 const IMAGE_MAX = 300;
 const LABEL_MAX = 100;
 const VOUCHER_LABEL_MAX = 40;
-const VALID_CATEGORIES = new Set(['Makanan', 'Minuman', 'Pastry', 'Combo']);
+
+export function makeBranchStockDocId(branchId: string, productId: string): string {
+  return sanitizeId(`${branchId}__${productId}`, 'stk');
+}
 
 function sanitizeId(raw: string, fallbackPrefix: string): string {
-  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 100);
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 120);
   if (cleaned && ID_PATTERN.test(cleaned)) return cleaned;
   return `${fallbackPrefix}-${Date.now()}`;
 }
@@ -50,13 +71,31 @@ function sanitizeCode(raw: string, maxLen: number, fallback: string): string {
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
+function sanitizeUpperCode(raw: string, maxLen: number, fallback: string): string {
+  const cleaned = raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, maxLen);
+  return cleaned.length > 0 ? cleaned : fallback;
+}
+
+function sanitizeCategory(raw: string): string {
+  const cleaned = raw.trim().slice(0, CATEGORY_MAX);
+  return cleaned.length > 0 ? cleaned : 'Umum';
+}
+
 function sanitizeUsername(raw: string): string {
   const cleaned = raw
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9._-]/g, '')
     .slice(0, USERNAME_MAX);
-  return cleaned.length >= 2 ? cleaned : `user${Date.now().toString().slice(-4)}`;
+  return cleaned.length >= 2
+    ? cleaned
+    : `user${Date.now().toString().slice(-4)}`;
 }
 
 function toIsoString(ts: unknown): string {
@@ -64,6 +103,8 @@ function toIsoString(ts: unknown): string {
   if (typeof ts === 'string') return ts;
   return new Date().toISOString();
 }
+
+/* ==================== USER PROFILE ==================== */
 
 export async function ensureUserProfile(
   ownerId: string,
@@ -81,7 +122,7 @@ export async function ensureUserProfile(
           0,
           DISPLAY_NAME_MAX
         ),
-        storeName: (storeName?.trim() || 'KasirPOS Store').slice(0, NAME_MAX),
+        storeName: (storeName?.trim() || 'Hikemore Store').slice(0, NAME_MAX),
         role: 'admin',
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -103,7 +144,10 @@ export async function updateUserProfile(
         0,
         DISPLAY_NAME_MAX
       ),
-      storeName: (input.storeName.trim() || 'KasirPOS Store').slice(0, NAME_MAX),
+      storeName: (input.storeName.trim() || 'Hikemore Store').slice(
+        0,
+        NAME_MAX
+      ),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -128,7 +172,7 @@ export function subscribeUserProfile(
       onData({
         ownerId: String(data.ownerId ?? ownerId),
         displayName: String(data.displayName ?? 'Admin Utama'),
-        storeName: String(data.storeName ?? 'KasirPOS Store'),
+        storeName: String(data.storeName ?? 'Hikemore Store'),
         role: 'admin',
         createdAt: toIsoString(data.createdAt),
       });
@@ -143,6 +187,8 @@ export function subscribeUserProfile(
   );
 }
 
+/* ==================== SEEDING & MIGRATION ==================== */
+
 export async function seedInitialDataIfNeeded(
   ownerId: string,
   ownerDisplayName: string,
@@ -150,38 +196,33 @@ export async function seedInitialDataIfNeeded(
 ): Promise<void> {
   if (!ID_PATTERN.test(ownerId)) return;
 
-  const productsPath = 'products';
   try {
-    const [prodSnap, vouchSnap, staffSnap] = await Promise.all([
-      getDocs(
-        query(collection(db, productsPath), where('ownerId', '==', ownerId))
-      ),
-      getDocs(
-        query(collection(db, 'vouchers'), where('ownerId', '==', ownerId))
-      ),
+    const [branchSnap, prodSnap, vouchSnap, staffSnap] = await Promise.all([
+      getDocs(query(collection(db, 'branches'), where('ownerId', '==', ownerId))),
+      getDocs(query(collection(db, 'products'), where('ownerId', '==', ownerId))),
+      getDocs(query(collection(db, 'vouchers'), where('ownerId', '==', ownerId))),
       getDocs(
         query(collection(db, 'staffAccounts'), where('ownerId', '==', ownerId))
       ),
     ]);
 
-    if (prodSnap.empty || vouchSnap.empty || staffSnap.empty) {
+    let defaultBranchId = branchSnap.docs[0]?.id ?? '';
+
+    // Pass 1: Seed branch, vouchers, and staff if empty
+    if (branchSnap.empty || vouchSnap.empty || staffSnap.empty) {
       const batch = writeBatch(db);
 
-      if (prodSnap.empty) {
-        for (const p of PRODUCTS) {
-          const docId = sanitizeId(`${ownerId.slice(0, 8)}-${p.id}`, 'prod');
-          batch.set(doc(db, productsPath, docId), {
-            ownerId,
-            sku: sanitizeCode(p.sku, SKU_MAX, 'SKU-1'),
-            barcode: sanitizeCode(p.barcode, BARCODE_MAX, '8990001'),
-            name: p.name.trim().slice(0, NAME_MAX),
-            price: Math.max(0, Math.round(p.price)),
-            image: p.image.slice(0, IMAGE_MAX),
-            category: VALID_CATEGORIES.has(p.category) ? p.category : 'Makanan',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        }
+      if (branchSnap.empty) {
+        defaultBranchId = sanitizeId(`${ownerId.slice(0, 8)}-cfd-senayan`, 'br');
+        batch.set(doc(db, 'branches', defaultBranchId), {
+          ownerId,
+          code: DEFAULT_BRANCH.code,
+          name: DEFAULT_BRANCH.name,
+          address: DEFAULT_BRANCH.address,
+          active: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
       }
 
       if (vouchSnap.empty) {
@@ -192,10 +233,7 @@ export async function seedInitialDataIfNeeded(
           );
           batch.set(doc(db, 'vouchers', docId), {
             ownerId,
-            code: v.code
-              .toUpperCase()
-              .replace(/[^A-Z0-9_-]/g, '')
-              .slice(0, 32),
+            code: sanitizeUpperCode(v.code, 32, 'PROMO'),
             label: v.label.trim().slice(0, VOUCHER_LABEL_MAX),
             type: v.type === 'fixed' ? 'fixed' : 'percent',
             value: Math.max(0, Math.round(v.value)),
@@ -236,9 +274,128 @@ export async function seedInitialDataIfNeeded(
 
       await batch.commit();
     }
+
+    // Pass 2: If product catalog is empty, import the 13 Hikemore CFD Senayan products + stocks + July baseline sales
+    if (prodSnap.empty) {
+      const branchesAfter = await getDocs(
+        query(collection(db, 'branches'), where('ownerId', '==', ownerId))
+      );
+      const mappedBranches: Branch[] = branchesAfter.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ownerId,
+          code: String(data.code ?? 'BR'),
+          name: String(data.name ?? DEFAULT_BRANCH.name),
+          address: String(data.address ?? ''),
+          active: Boolean(data.active ?? true),
+        };
+      });
+
+      await importCatalogRowsToFirestore(ownerId, HIKEMORE_SEED_ROWS, {
+        existingBranches: mappedBranches,
+        existingProducts: [],
+        existingStocks: [],
+        includeSales: true,
+        actorName: ownerDisplayName || 'Admin Utama',
+      });
+    }
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, productsPath);
+    handleFirestoreError(error, OperationType.WRITE, 'seedInitialData');
   }
+}
+
+export function hasLegacyCafeProducts(products: Product[]): boolean {
+  return products.some(
+    (p) => LEGACY_CAFE_SKUS.has(p.sku) || LEGACY_CAFE_CATEGORIES.has(p.category)
+  );
+}
+
+export async function replaceLegacyCafeWithHikemore(
+  ownerId: string,
+  existingProducts: Product[],
+  existingBranches: Branch[],
+  existingStocks: BranchStock[],
+  actorName: string
+): Promise<{ removedCafeCount: number; importedCount: number }> {
+  const legacyProducts = existingProducts.filter(
+    (p) => LEGACY_CAFE_SKUS.has(p.sku) || LEGACY_CAFE_CATEGORIES.has(p.category)
+  );
+  const legacyIds = new Set(legacyProducts.map((p) => p.id));
+
+  try {
+    if (legacyProducts.length > 0) {
+      const delBatch = writeBatch(db);
+      for (const lp of legacyProducts) {
+        delBatch.delete(doc(db, 'products', lp.id));
+      }
+      for (const st of existingStocks) {
+        if (legacyIds.has(st.productId)) {
+          delBatch.delete(doc(db, 'branchStocks', st.id));
+        }
+      }
+      await delBatch.commit();
+    }
+
+    const remainingProducts = existingProducts.filter(
+      (p) => !legacyIds.has(p.id)
+    );
+    const remainingStocks = existingStocks.filter(
+      (st) => !legacyIds.has(st.productId)
+    );
+
+    const res = await importCatalogRowsToFirestore(ownerId, HIKEMORE_SEED_ROWS, {
+      existingBranches,
+      existingProducts: remainingProducts,
+      existingStocks: remainingStocks,
+      includeSales: true,
+      actorName,
+    });
+
+    return {
+      removedCafeCount: legacyProducts.length,
+      importedCount: res.productsUpserted,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'products');
+  }
+}
+
+/* ==================== SUBSCRIPTIONS ==================== */
+
+export function subscribeBranches(
+  ownerId: string,
+  onData: (branches: Branch[]) => void,
+  onError: (err: Error) => void
+): () => void {
+  const path = 'branches';
+  const q = query(collection(db, path), where('ownerId', '==', ownerId));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: Branch[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ownerId: String(data.ownerId ?? ownerId),
+          code: String(data.code ?? 'BR'),
+          name: String(data.name ?? 'Cabang'),
+          address: String(data.address ?? ''),
+          active: Boolean(data.active ?? true),
+          createdAt: toIsoString(data.createdAt),
+        };
+      });
+      list.sort((a, b) => a.name.localeCompare(b.name));
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    }
+  );
 }
 
 export function subscribeProducts(
@@ -260,12 +417,135 @@ export function subscribeProducts(
           name: String(data.name ?? ''),
           price: Number(data.price ?? 0),
           image: String(data.image ?? ''),
-          category: (VALID_CATEGORIES.has(String(data.category))
-            ? data.category
-            : 'Makanan') as Product['category'],
+          category: sanitizeCategory(String(data.category ?? 'Umum')),
         };
       });
       list.sort((a, b) => a.name.localeCompare(b.name));
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    }
+  );
+}
+
+export function subscribeBranchStocks(
+  ownerId: string,
+  onData: (stocks: BranchStock[]) => void,
+  onError: (err: Error) => void
+): () => void {
+  const path = 'branchStocks';
+  const q = query(collection(db, path), where('ownerId', '==', ownerId));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: BranchStock[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ownerId: String(data.ownerId ?? ownerId),
+          branchId: String(data.branchId ?? ''),
+          productId: String(data.productId ?? ''),
+          initialStock: Math.max(0, Number(data.initialStock ?? 0)),
+          currentStock: Math.max(0, Number(data.currentStock ?? 0)),
+          minThreshold: Math.max(0, Number(data.minThreshold ?? 2)),
+          updatedAt: toIsoString(data.updatedAt),
+        };
+      });
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    }
+  );
+}
+
+export function subscribeStockLogs(
+  ownerId: string,
+  onData: (logs: StockLog[]) => void,
+  onError: (err: Error) => void
+): () => void {
+  const path = 'stockLogs';
+  const q = query(collection(db, path), where('ownerId', '==', ownerId));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: StockLog[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ownerId: String(data.ownerId ?? ownerId),
+          branchId: String(data.branchId ?? ''),
+          branchName: String(data.branchName ?? ''),
+          productId: String(data.productId ?? ''),
+          productSku: String(data.productSku ?? ''),
+          productName: String(data.productName ?? ''),
+          type: (data.type ?? 'adjustment') as StockLogType,
+          qtyDelta: Number(data.qtyDelta ?? 0),
+          stockBefore: Number(data.stockBefore ?? 0),
+          stockAfter: Number(data.stockAfter ?? 0),
+          note: String(data.note ?? ''),
+          actorName: String(data.actorName ?? 'Admin'),
+          createdAt: toIsoString(data.createdAt),
+        };
+      });
+      list.sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    }
+  );
+}
+
+export function subscribeSalesLines(
+  ownerId: string,
+  onData: (lines: SalesLine[]) => void,
+  onError: (err: Error) => void
+): () => void {
+  const path = 'salesLines';
+  const q = query(collection(db, path), where('ownerId', '==', ownerId));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: SalesLine[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ownerId: String(data.ownerId ?? ownerId),
+          transactionId: String(data.transactionId ?? ''),
+          branchId: String(data.branchId ?? ''),
+          branchName: String(data.branchName ?? ''),
+          productId: String(data.productId ?? ''),
+          productSku: String(data.productSku ?? ''),
+          productName: String(data.productName ?? ''),
+          category: String(data.category ?? 'Umum'),
+          qty: Number(data.qty ?? 0),
+          unitPrice: Number(data.unitPrice ?? 0),
+          lineTotal: Number(data.lineTotal ?? 0),
+          saleYear: Number(data.saleYear ?? new Date().getFullYear()),
+          saleMonth: Number(data.saleMonth ?? new Date().getMonth() + 1),
+          source: (data.source === 'import' ? 'import' : 'pos') as
+            | 'pos'
+            | 'import',
+          createdAt: toIsoString(data.createdAt),
+        };
+      });
       onData(list);
     },
     (error) => {
@@ -365,10 +645,19 @@ export function subscribeTransactions(
     (snapshot) => {
       const list: SimpleTransaction[] = snapshot.docs.map((d) => {
         const data = d.data();
+        const createdIso = toIsoString(data.createdAt);
+        const dt = new Date(createdIso);
         return {
           id: d.id,
+          branchId: String(data.branchId ?? ''),
+          branchName: String(data.branchName ?? 'Pusat'),
           invoiceNo: String(data.invoiceNo ?? d.id),
           cashierName: String(data.cashierName ?? 'Admin'),
+          saleYear: Number(data.saleYear ?? dt.getFullYear()),
+          saleMonth: Number(data.saleMonth ?? dt.getMonth() + 1),
+          source: (data.source === 'import' ? 'import' : 'pos') as
+            | 'pos'
+            | 'import',
           items: [],
           totalQty: Number(data.totalQty ?? 0),
           subtotal: Number(data.subtotal ?? 0),
@@ -378,7 +667,7 @@ export function subscribeTransactions(
           paymentMethod: (data.paymentMethod ?? 'cash') as PaymentMethod,
           amountPaid: Number(data.amountPaid ?? 0),
           change: Number(data.change ?? 0),
-          createdAt: toIsoString(data.createdAt),
+          createdAt: createdIso,
         };
       });
       list.sort(
@@ -423,6 +712,88 @@ export async function fetchTransactionItems(
   }
 }
 
+/* ==================== BRANCHES CRUD ==================== */
+
+export async function saveBranchToFirestore(
+  ownerId: string,
+  input: {
+    id?: string;
+    code: string;
+    name: string;
+    address: string;
+    active: boolean;
+  }
+): Promise<string> {
+  const name = input.name.trim().slice(0, BRANCH_NAME_MAX);
+  if (!name) throw new Error('Nama cabang wajib diisi.');
+  const code = sanitizeUpperCode(
+    input.code || name,
+    BRANCH_CODE_MAX,
+    `CAB-${Date.now().toString().slice(-3)}`
+  );
+  const address = input.address.trim().slice(0, ADDRESS_MAX);
+
+  if (input.id) {
+    const path = `branches/${input.id}`;
+    try {
+      await updateDoc(doc(db, 'branches', input.id), {
+        code,
+        name,
+        address,
+        active: Boolean(input.active),
+        updatedAt: serverTimestamp(),
+      });
+      return input.id;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  }
+
+  const newId = sanitizeId(
+    `${ownerId.slice(0, 8)}-${code.toLowerCase()}-${Date.now().toString().slice(-4)}`,
+    'br'
+  );
+  const path = `branches/${newId}`;
+  try {
+    await setDoc(doc(db, 'branches', newId), {
+      ownerId,
+      code,
+      name,
+      address,
+      active: Boolean(input.active),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return newId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function deleteBranchFromFirestore(
+  ownerId: string,
+  branchId: string
+): Promise<void> {
+  const path = `branches/${branchId}`;
+  try {
+    const stockSnap = await getDocs(
+      query(
+        collection(db, 'branchStocks'),
+        where('ownerId', '==', ownerId),
+        where('branchId', '==', branchId)
+      )
+    );
+    const batch = writeBatch(db);
+    stockSnap.docs.forEach((d) => batch.delete(d.ref));
+    batch.delete(doc(db, 'branches', branchId));
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+/* ==================== PRODUCTS CRUD ==================== */
+
 export async function saveProductToFirestore(
   ownerId: string,
   input: {
@@ -432,25 +803,27 @@ export async function saveProductToFirestore(
     name: string;
     price: number;
     image: string;
-    category: Product['category'];
+    category: string;
+    initialBranchId?: string;
+    initialBranchName?: string;
+    initialStockQty?: number;
+    actorName?: string;
   }
-): Promise<void> {
+): Promise<string> {
   const sku = sanitizeCode(
     input.sku,
     SKU_MAX,
     `SKU-${Date.now().toString().slice(-4)}`
   );
   const barcode = sanitizeCode(
-    input.barcode,
+    input.barcode || sku,
     BARCODE_MAX,
-    `899${Date.now().toString().slice(-7)}`
+    sku
   );
   const name = input.name.trim().slice(0, NAME_MAX);
   const price = Math.min(1000000000, Math.max(0, Math.round(input.price)));
   const image = input.image.trim().slice(0, IMAGE_MAX);
-  const category = VALID_CATEGORIES.has(input.category)
-    ? input.category
-    : 'Makanan';
+  const category = sanitizeCategory(input.category);
 
   if (!name) throw new Error('Nama produk tidak boleh kosong.');
 
@@ -466,19 +839,20 @@ export async function saveProductToFirestore(
         category,
         updatedAt: serverTimestamp(),
       });
+      return input.id;
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, path);
     }
-    return;
   }
 
   const newId = sanitizeId(
-    `${ownerId.slice(0, 8)}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    `${ownerId.slice(0, 8)}-${sku.toLowerCase()}-${Date.now().toString().slice(-4)}`,
     'prod'
   );
   const path = `products/${newId}`;
   try {
-    await setDoc(doc(db, 'products', newId), {
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'products', newId), {
       ownerId,
       sku,
       barcode,
@@ -489,21 +863,190 @@ export async function saveProductToFirestore(
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
+
+    if (
+      input.initialBranchId &&
+      typeof input.initialStockQty === 'number' &&
+      input.initialStockQty >= 0
+    ) {
+      const qty = Math.min(1000000, Math.max(0, Math.round(input.initialStockQty)));
+      const stockDocId = makeBranchStockDocId(input.initialBranchId, newId);
+      batch.set(doc(db, 'branchStocks', stockDocId), {
+        ownerId,
+        branchId: input.initialBranchId,
+        productId: newId,
+        initialStock: qty,
+        currentStock: qty,
+        minThreshold: 2,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      if (qty > 0) {
+        const logId = sanitizeId(
+          `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          'log'
+        );
+        batch.set(doc(db, 'stockLogs', logId), {
+          ownerId,
+          branchId: input.initialBranchId,
+          branchName: (input.initialBranchName || 'Cabang').slice(
+            0,
+            BRANCH_NAME_MAX
+          ),
+          productId: newId,
+          productSku: sku,
+          productName: name,
+          type: 'initial',
+          qtyDelta: qty,
+          stockBefore: 0,
+          stockAfter: qty,
+          note: 'Stok awal produk baru',
+          actorName: (input.actorName || 'Admin').slice(0, DISPLAY_NAME_MAX),
+          createdAt: serverTimestamp(),
+        });
+      }
+    }
+
+    await batch.commit();
+    return newId;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
   }
 }
 
 export async function deleteProductFromFirestore(
+  ownerId: string,
   productId: string
 ): Promise<void> {
   const path = `products/${productId}`;
   try {
-    await deleteDoc(doc(db, 'products', productId));
+    const stockSnap = await getDocs(
+      query(
+        collection(db, 'branchStocks'),
+        where('ownerId', '==', ownerId),
+        where('productId', '==', productId)
+      )
+    );
+    const batch = writeBatch(db);
+    stockSnap.docs.forEach((d) => batch.delete(d.ref));
+    batch.delete(doc(db, 'products', productId));
+    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
+
+/* ==================== BRANCH STOCKS (RESTOK / OPNAME) ==================== */
+
+export async function adjustBranchStockAtomic(
+  ownerId: string,
+  params: {
+    branchId: string;
+    branchName: string;
+    product: Product;
+    mode: 'restock' | 'opname';
+    qtyInput: number;
+    initialStockOverride?: number;
+    minThreshold?: number;
+    note: string;
+    actorName: string;
+  }
+): Promise<void> {
+  const stockDocId = makeBranchStockDocId(params.branchId, params.product.id);
+  const stockRef = doc(db, 'branchStocks', stockDocId);
+  const logId = sanitizeId(
+    `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    'log'
+  );
+  const logRef = doc(db, 'stockLogs', logId);
+  const path = `branchStocks/${stockDocId}`;
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(stockRef);
+      const prevCurrent = snap.exists()
+        ? Math.max(0, Number(snap.data().currentStock ?? 0))
+        : 0;
+      const prevInitial = snap.exists()
+        ? Math.max(0, Number(snap.data().initialStock ?? prevCurrent))
+        : 0;
+      const prevThreshold = snap.exists()
+        ? Math.max(0, Number(snap.data().minThreshold ?? 2))
+        : 2;
+
+      const cleanInput = Math.min(
+        1000000,
+        Math.max(0, Math.round(params.qtyInput))
+      );
+      const nextCurrent =
+        params.mode === 'restock'
+          ? Math.min(1000000, prevCurrent + cleanInput)
+          : cleanInput;
+
+      const nextInitial =
+        params.initialStockOverride !== undefined
+          ? Math.min(
+              1000000,
+              Math.max(0, Math.round(params.initialStockOverride))
+            )
+          : params.mode === 'restock'
+            ? Math.min(1000000, prevInitial + cleanInput)
+            : Math.max(prevInitial, nextCurrent);
+
+      const nextThreshold =
+        params.minThreshold !== undefined
+          ? Math.min(100000, Math.max(0, Math.round(params.minThreshold)))
+          : prevThreshold;
+
+      if (snap.exists()) {
+        tx.update(stockRef, {
+          initialStock: nextInitial,
+          currentStock: nextCurrent,
+          minThreshold: nextThreshold,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        tx.set(stockRef, {
+          ownerId,
+          branchId: params.branchId,
+          productId: params.product.id,
+          initialStock: nextInitial,
+          currentStock: nextCurrent,
+          minThreshold: nextThreshold,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      const delta = nextCurrent - prevCurrent;
+      tx.set(logRef, {
+        ownerId,
+        branchId: params.branchId,
+        branchName: params.branchName.trim().slice(0, BRANCH_NAME_MAX) || 'Cabang',
+        productId: params.product.id,
+        productSku: sanitizeCode(params.product.sku, SKU_MAX, 'SKU'),
+        productName: params.product.name.trim().slice(0, NAME_MAX) || 'Produk',
+        type: params.mode === 'restock' ? 'restock' : 'adjustment',
+        qtyDelta: delta,
+        stockBefore: prevCurrent,
+        stockAfter: nextCurrent,
+        note: (
+          params.note.trim() ||
+          (params.mode === 'restock'
+            ? `Restok masuk +${cleanInput} pcs`
+            : `Stok opname -> ${nextCurrent} pcs`)
+        ).slice(0, NOTE_MAX),
+        actorName: (params.actorName.trim() || 'Admin').slice(0, DISPLAY_NAME_MAX),
+        createdAt: serverTimestamp(),
+      });
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+/* ==================== VOUCHERS & STAFF CRUD ==================== */
 
 export async function saveVoucherToFirestore(
   ownerId: string,
@@ -517,11 +1060,7 @@ export async function saveVoucherToFirestore(
     active: boolean;
   }
 ): Promise<void> {
-  const code = input.code
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9_-]/g, '')
-    .slice(0, 32);
+  const code = sanitizeUpperCode(input.code, 32, '');
   if (code.length < 2) {
     throw new Error('Kode voucher minimal 2 karakter (huruf/angka).');
   }
@@ -652,9 +1191,13 @@ export async function deleteStaffAccountFromFirestore(
   }
 }
 
+/* ==================== ATOMIC POS CHECKOUT WITH STOCK DEDUCTION ==================== */
+
 export async function createTransactionAtomic(
   ownerId: string,
   params: {
+    branchId: string;
+    branchName: string;
     invoiceNo: string;
     cashierName: string;
     items: CartItem[];
@@ -668,73 +1211,597 @@ export async function createTransactionAtomic(
     change: number;
   }
 ): Promise<SimpleTransaction> {
+  if (!params.branchId) {
+    throw new Error('Pilih cabang aktif terlebih dahulu sebelum checkout.');
+  }
+
+  const now = new Date();
+  const saleYear = now.getFullYear();
+  const saleMonth = now.getMonth() + 1;
+
   const transactionId = sanitizeId(
     `tx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     'tx'
   );
   const invoiceNo = sanitizeCode(params.invoiceNo, 32, 'INV-0001');
+  const branchName =
+    params.branchName.trim().slice(0, BRANCH_NAME_MAX) || 'Cabang';
   const cashierName = (params.cashierName.trim() || 'Admin').slice(
     0,
     DISPLAY_NAME_MAX
   );
   const totalQty = params.items.reduce((s, i) => s + i.qty, 0);
+  const safeSubtotal = Math.max(0, Math.round(params.subtotal));
+  const safeGrandTotal = Math.max(0, Math.round(params.grandTotal));
+
+  // Distribute net grandTotal proportionally across line items for exact SKU revenue analytics
+  const distributedTotals = params.items.map((item) => {
+    const gross = Math.max(0, Math.round(item.unitPrice)) * Math.max(1, Math.round(item.qty));
+    if (safeSubtotal <= 0) return 0;
+    return Math.round((gross / safeSubtotal) * safeGrandTotal);
+  });
+  const distSum = distributedTotals.reduce((a, b) => a + b, 0);
+  if (distributedTotals.length > 0 && distSum !== safeGrandTotal) {
+    distributedTotals[0] = Math.max(
+      0,
+      distributedTotals[0] + (safeGrandTotal - distSum)
+    );
+  }
 
   const txPath = `transactions/${transactionId}`;
-  const batch = writeBatch(db);
-
-  batch.set(doc(db, 'transactions', transactionId), {
-    ownerId,
-    invoiceNo,
-    cashierName,
-    itemCount: Math.max(1, params.items.length),
-    totalQty: Math.max(1, totalQty),
-    subtotal: Math.max(0, Math.round(params.subtotal)),
-    discountMode: params.discountMode,
-    discountAmount: Math.round(params.discountAmount),
-    adjustmentLabel: (params.adjustmentLabel ?? '').slice(0, LABEL_MAX),
-    grandTotal: Math.max(0, Math.round(params.grandTotal)),
-    paymentMethod: params.paymentMethod,
-    amountPaid: Math.max(0, Math.round(params.amountPaid)),
-    change: Math.max(0, Math.round(params.change)),
-    createdAt: serverTimestamp(),
-  });
-
-  params.items.forEach((item, index) => {
-    const itemId = sanitizeId(`item-${index + 1}-${item.productId}`, 'item');
-    const safeUnitPrice = Math.max(0, Math.round(item.unitPrice));
-    const safeQty = Math.max(1, Math.round(item.qty));
-
-    batch.set(doc(db, 'transactions', transactionId, 'items', itemId), {
-      ownerId,
-      transactionId,
-      productId: sanitizeId(item.productId, 'prod'),
-      name: item.name.trim().slice(0, NAME_MAX) || 'Produk',
-      unitPrice: safeUnitPrice,
-      qty: safeQty,
-      lineTotal: safeUnitPrice * safeQty,
-      createdAt: serverTimestamp(),
-    });
-  });
 
   try {
-    await batch.commit();
+    await runTransaction(db, async (tx) => {
+      // 1. Read & verify every item's branch stock BEFORE any writes
+      const stockSnapshots: Array<{
+        item: CartItem;
+        stockRef: ReturnType<typeof doc>;
+        currentStock: number;
+      }> = [];
+
+      for (const item of params.items) {
+        const stockDocId = makeBranchStockDocId(params.branchId, item.productId);
+        const stockRef = doc(db, 'branchStocks', stockDocId);
+        const snap = await tx.get(stockRef);
+        const currentStock = snap.exists()
+          ? Math.max(0, Number(snap.data().currentStock ?? 0))
+          : 0;
+        const requestedQty = Math.max(1, Math.round(item.qty));
+
+        if (!snap.exists() || currentStock < requestedQty) {
+          throw new Error(
+            `STOCK_INSUFFICIENT::Stok "${item.name}" di cabang ${branchName} tidak mencukupi (tersisa ${currentStock} pcs, diminta ${requestedQty} pcs).`
+          );
+        }
+
+        stockSnapshots.push({
+          item,
+          stockRef,
+          currentStock,
+        });
+      }
+
+      // 2. Write Transaction Header
+      tx.set(doc(db, 'transactions', transactionId), {
+        ownerId,
+        branchId: params.branchId,
+        branchName,
+        invoiceNo,
+        cashierName,
+        saleYear,
+        saleMonth,
+        source: 'pos',
+        itemCount: Math.max(1, params.items.length),
+        totalQty: Math.max(1, totalQty),
+        subtotal: safeSubtotal,
+        discountMode: params.discountMode,
+        discountAmount: Math.round(params.discountAmount),
+        adjustmentLabel: (params.adjustmentLabel ?? '').slice(0, LABEL_MAX),
+        grandTotal: safeGrandTotal,
+        paymentMethod: params.paymentMethod,
+        amountPaid: Math.max(0, Math.round(params.amountPaid)),
+        change: Math.max(0, Math.round(params.change)),
+        createdAt: serverTimestamp(),
+      });
+
+      // 3. Deduct branchStocks + write items subcollection + salesLines + stockLogs
+      stockSnapshots.forEach(({ item, stockRef, currentStock }, index) => {
+        const safeQty = Math.max(1, Math.round(item.qty));
+        const safeUnitPrice = Math.max(0, Math.round(item.unitPrice));
+        const nextStock = currentStock - safeQty;
+        const safeSku = sanitizeCode(item.sku || item.productId, SKU_MAX, 'SKU');
+        const safeName = item.name.trim().slice(0, NAME_MAX) || 'Produk';
+        const safeCategory = sanitizeCategory(item.category || 'Umum');
+        const netLineTotal = Math.max(0, distributedTotals[index] ?? safeUnitPrice * safeQty);
+
+        tx.update(stockRef, {
+          currentStock: nextStock,
+          updatedAt: serverTimestamp(),
+        });
+
+        const itemId = sanitizeId(`item-${index + 1}-${item.productId}`, 'item');
+        tx.set(doc(db, 'transactions', transactionId, 'items', itemId), {
+          ownerId,
+          transactionId,
+          productId: sanitizeId(item.productId, 'prod'),
+          name: safeName,
+          unitPrice: safeUnitPrice,
+          qty: safeQty,
+          lineTotal: safeUnitPrice * safeQty,
+          createdAt: serverTimestamp(),
+        });
+
+        const salesLineId = sanitizeId(
+          `sl-${transactionId}-${index + 1}`,
+          'sl'
+        );
+        tx.set(doc(db, 'salesLines', salesLineId), {
+          ownerId,
+          transactionId,
+          branchId: params.branchId,
+          branchName,
+          productId: sanitizeId(item.productId, 'prod'),
+          productSku: safeSku,
+          productName: safeName,
+          category: safeCategory,
+          qty: safeQty,
+          unitPrice: safeUnitPrice,
+          lineTotal: netLineTotal,
+          saleYear,
+          saleMonth,
+          source: 'pos',
+          createdAt: serverTimestamp(),
+        });
+
+        const logId = sanitizeId(
+          `log-${transactionId}-${index + 1}`,
+          'log'
+        );
+        tx.set(doc(db, 'stockLogs', logId), {
+          ownerId,
+          branchId: params.branchId,
+          branchName,
+          productId: sanitizeId(item.productId, 'prod'),
+          productSku: safeSku,
+          productName: safeName,
+          type: 'sale',
+          qtyDelta: -safeQty,
+          stockBefore: currentStock,
+          stockAfter: nextStock,
+          note: `Penjualan POS ${invoiceNo}`,
+          actorName: cashierName,
+          createdAt: serverTimestamp(),
+        });
+      });
+    });
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('STOCK_INSUFFICIENT::')) {
+      throw new Error(error.message.replace('STOCK_INSUFFICIENT::', ''));
+    }
     handleFirestoreError(error, OperationType.CREATE, txPath);
   }
 
   return {
     id: transactionId,
+    branchId: params.branchId,
+    branchName,
     invoiceNo,
     cashierName,
+    saleYear,
+    saleMonth,
+    source: 'pos',
     items: params.items,
     totalQty,
-    subtotal: Math.max(0, Math.round(params.subtotal)),
+    subtotal: safeSubtotal,
     discountAmount: Math.round(params.discountAmount),
     adjustmentLabel: params.adjustmentLabel,
-    grandTotal: Math.max(0, Math.round(params.grandTotal)),
+    grandTotal: safeGrandTotal,
     paymentMethod: params.paymentMethod,
     amountPaid: Math.max(0, Math.round(params.amountPaid)),
     change: Math.max(0, Math.round(params.change)),
-    createdAt: new Date().toISOString(),
+    createdAt: now.toISOString(),
   };
+}
+
+/* ==================== BULK SPREADSHEET / SHEET IMPORT ==================== */
+
+export async function importCatalogRowsToFirestore(
+  ownerId: string,
+  rows: ImportedCatalogRow[],
+  options: {
+    existingBranches: Branch[];
+    existingProducts: Product[];
+    existingStocks: BranchStock[];
+    includeSales: boolean;
+    actorName: string;
+  }
+): Promise<{
+  branchesCreated: number;
+  productsUpserted: number;
+  stocksUpdated: number;
+  salesLinesImported: number;
+}> {
+  if (rows.length === 0) {
+    return {
+      branchesCreated: 0,
+      productsUpserted: 0,
+      stocksUpdated: 0,
+      salesLinesImported: 0,
+    };
+  }
+
+  const actor = (options.actorName.trim() || 'Admin').slice(0, DISPLAY_NAME_MAX);
+
+  // Build lookup maps
+  const branchByName = new Map<string, Branch>();
+  for (const b of options.existingBranches) {
+    branchByName.set(b.name.trim().toLowerCase(), b);
+  }
+
+  const productBySku = new Map<string, Product>();
+  for (const p of options.existingProducts) {
+    productBySku.set(p.sku.trim().toLowerCase(), p);
+  }
+
+  const stockByKey = new Map<string, BranchStock>();
+  for (const s of options.existingStocks) {
+    stockByKey.set(`${s.branchId}::${s.productId}`, s);
+  }
+
+  let branchesCreated = 0;
+  let productsUpserted = 0;
+  let stocksUpdated = 0;
+  let salesLinesImported = 0;
+
+  try {
+    // PASS 1: Create any missing branches and upsert products (chunked to stay safely under 400 writes/batch)
+    const uniqueBranchNames = Array.from(
+      new Set(
+        rows
+          .map((r) => (r.branchName.trim() || DEFAULT_BRANCH.name).slice(0, BRANCH_NAME_MAX))
+      )
+    );
+
+    const missingBranches = uniqueBranchNames.filter(
+      (name) => !branchByName.has(name.toLowerCase())
+    );
+
+    if (missingBranches.length > 0) {
+      const bBatch = writeBatch(db);
+      missingBranches.forEach((bName, i) => {
+        const bCode = sanitizeUpperCode(bName, BRANCH_CODE_MAX, `BR-${i + 1}`);
+        const bId = sanitizeId(
+          `${ownerId.slice(0, 8)}-${bCode.toLowerCase()}-${Date.now().toString().slice(-3)}${i}`,
+          'br'
+        );
+        bBatch.set(doc(db, 'branches', bId), {
+          ownerId,
+          code: bCode,
+          name: bName,
+          address: '',
+          active: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        branchByName.set(bName.toLowerCase(), {
+          id: bId,
+          ownerId,
+          code: bCode,
+          name: bName,
+          address: '',
+          active: true,
+        });
+        branchesCreated += 1;
+      });
+      await bBatch.commit();
+    }
+
+    // Deduplicate products by SKU across rows
+    const uniqueProductRows = new Map<string, ImportedCatalogRow>();
+    for (const r of rows) {
+      const key = r.sku.trim().toLowerCase();
+      if (!uniqueProductRows.has(key)) {
+        uniqueProductRows.set(key, r);
+      }
+    }
+
+    const prodEntries = Array.from(uniqueProductRows.entries());
+    for (let i = 0; i < prodEntries.length; i += 200) {
+      const chunk = prodEntries.slice(i, i + 200);
+      const pBatch = writeBatch(db);
+
+      for (const [skuKey, row] of chunk) {
+        const cleanSku = sanitizeCode(row.sku, SKU_MAX, `SKU-${i}`);
+        const cleanBarcode = sanitizeCode(
+          row.barcode || cleanSku,
+          BARCODE_MAX,
+          cleanSku
+        );
+        const cleanName = row.name.trim().slice(0, NAME_MAX) || cleanSku;
+        const cleanCategory = sanitizeCategory(row.category);
+        const cleanPrice = Math.min(
+          1000000000,
+          Math.max(0, Math.round(row.price))
+        );
+
+        const existing = productBySku.get(skuKey);
+        if (existing) {
+          pBatch.update(doc(db, 'products', existing.id), {
+            sku: cleanSku,
+            barcode: cleanBarcode,
+            name: cleanName,
+            price: cleanPrice > 0 ? cleanPrice : existing.price,
+            image: existing.image || '',
+            category: cleanCategory,
+            updatedAt: serverTimestamp(),
+          });
+          productBySku.set(skuKey, {
+            ...existing,
+            sku: cleanSku,
+            barcode: cleanBarcode,
+            name: cleanName,
+            price: cleanPrice > 0 ? cleanPrice : existing.price,
+            category: cleanCategory,
+          });
+        } else {
+          const newId = sanitizeId(
+            `${ownerId.slice(0, 8)}-${cleanSku.toLowerCase()}`,
+            'prod'
+          );
+          pBatch.set(doc(db, 'products', newId), {
+            ownerId,
+            sku: cleanSku,
+            barcode: cleanBarcode,
+            name: cleanName,
+            price: cleanPrice,
+            image: '',
+            category: cleanCategory,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          productBySku.set(skuKey, {
+            id: newId,
+            sku: cleanSku,
+            barcode: cleanBarcode,
+            name: cleanName,
+            price: cleanPrice,
+            image: '',
+            category: cleanCategory,
+          });
+        }
+        productsUpserted += 1;
+      }
+
+      await pBatch.commit();
+    }
+
+    // PASS 2: Upsert branchStocks + stockLogs (branches & products now exist in Firestore!)
+    for (let i = 0; i < rows.length; i += 120) {
+      const chunk = rows.slice(i, i + 120);
+      const sBatch = writeBatch(db);
+
+      chunk.forEach((row, idx) => {
+        const bName = (row.branchName.trim() || DEFAULT_BRANCH.name).slice(
+          0,
+          BRANCH_NAME_MAX
+        );
+        const branch = branchByName.get(bName.toLowerCase());
+        const product = productBySku.get(row.sku.trim().toLowerCase());
+        if (!branch || !product) return;
+
+        const stockDocId = makeBranchStockDocId(branch.id, product.id);
+        const existingStock = stockByKey.get(`${branch.id}::${product.id}`);
+        const initialStock = Math.min(
+          1000000,
+          Math.max(0, Math.round(row.initialStock))
+        );
+        const currentStock = Math.min(
+          1000000,
+          Math.max(0, Math.round(row.currentStock))
+        );
+
+        if (existingStock) {
+          sBatch.update(doc(db, 'branchStocks', stockDocId), {
+            initialStock,
+            currentStock,
+            minThreshold: existingStock.minThreshold ?? 2,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          sBatch.set(doc(db, 'branchStocks', stockDocId), {
+            ownerId,
+            branchId: branch.id,
+            productId: product.id,
+            initialStock,
+            currentStock,
+            minThreshold: 2,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        const logId = sanitizeId(
+          `imp-${Date.now()}-${i + idx}-${Math.random().toString(36).slice(2, 5)}`,
+          'log'
+        );
+        const prev = existingStock?.currentStock ?? 0;
+        sBatch.set(doc(db, 'stockLogs', logId), {
+          ownerId,
+          branchId: branch.id,
+          branchName: branch.name,
+          productId: product.id,
+          productSku: product.sku,
+          productName: product.name,
+          type: 'import',
+          qtyDelta: currentStock - prev,
+          stockBefore: prev,
+          stockAfter: currentStock,
+          note: `Impor data stok (Awal: ${initialStock}, Sisa: ${currentStock})`,
+          actorName: actor,
+          createdAt: serverTimestamp(),
+        });
+
+        stocksUpdated += 1;
+      });
+
+      await sBatch.commit();
+    }
+
+    // PASS 3: Optional imported historical sales grouped by (branch, year, month)
+    if (options.includeSales) {
+      const salesRows = rows.filter((r) => (r.qtySold ?? 0) > 0);
+      const groups = new Map<string, ImportedCatalogRow[]>();
+
+      for (const sr of salesRows) {
+        const bName = (sr.branchName.trim() || DEFAULT_BRANCH.name).slice(
+          0,
+          BRANCH_NAME_MAX
+        );
+        const yr = sr.saleYear ?? new Date().getFullYear();
+        const mo = sr.saleMonth ?? new Date().getMonth() + 1;
+        const gKey = `${bName.toLowerCase()}::${yr}::${mo}`;
+        const list = groups.get(gKey) ?? [];
+        list.push(sr);
+        groups.set(gKey, list);
+      }
+
+      let groupIdx = 0;
+      for (const [, groupRows] of groups.entries()) {
+        groupIdx += 1;
+        const first = groupRows[0];
+        const bName = (first.branchName.trim() || DEFAULT_BRANCH.name).slice(
+          0,
+          BRANCH_NAME_MAX
+        );
+        const branch = branchByName.get(bName.toLowerCase());
+        if (!branch) continue;
+
+        const saleYear = Math.min(
+          2100,
+          Math.max(2000, first.saleYear ?? new Date().getFullYear())
+        );
+        const saleMonth = Math.min(
+          12,
+          Math.max(1, first.saleMonth ?? new Date().getMonth() + 1)
+        );
+
+        // Process in chunks of 100 items per synthetic import transaction
+        for (let c = 0; c < groupRows.length; c += 100) {
+          const chunk = groupRows.slice(c, c + 100);
+          const txId = sanitizeId(
+            `tx-imp-${Date.now()}-${groupIdx}-${c}`,
+            'tx'
+          );
+          const invoiceNo = sanitizeCode(
+            `IMP-${saleYear}${String(saleMonth).padStart(2, '0')}-${String(groupIdx).padStart(2, '0')}`,
+            32,
+            'IMP-01'
+          );
+
+          const totalQty = chunk.reduce(
+            (s, r) => s + Math.max(1, Math.round(r.qtySold ?? 1)),
+            0
+          );
+          const grandTotal = chunk.reduce(
+            (s, r) =>
+              s +
+              Math.max(
+                0,
+                Math.round(
+                  r.totalSales !== undefined
+                    ? r.totalSales
+                    : r.price * Math.max(1, Math.round(r.qtySold ?? 1))
+                )
+              ),
+            0
+          );
+
+          const txBatch = writeBatch(db);
+          txBatch.set(doc(db, 'transactions', txId), {
+            ownerId,
+            branchId: branch.id,
+            branchName: branch.name,
+            invoiceNo,
+            cashierName: actor,
+            saleYear,
+            saleMonth,
+            source: 'import',
+            itemCount: chunk.length,
+            totalQty: Math.max(1, totalQty),
+            subtotal: grandTotal,
+            discountMode: 'none',
+            discountAmount: 0,
+            adjustmentLabel: `Impor Rekapan Bulan ${saleMonth}/${saleYear}`,
+            grandTotal,
+            paymentMethod: 'cash',
+            amountPaid: grandTotal,
+            change: 0,
+            createdAt: serverTimestamp(),
+          });
+
+          chunk.forEach((row, idx) => {
+            const product = productBySku.get(row.sku.trim().toLowerCase());
+            if (!product) return;
+            const qty = Math.max(1, Math.round(row.qtySold ?? 1));
+            const lineTotal = Math.max(
+              0,
+              Math.round(
+                row.totalSales !== undefined ? row.totalSales : product.price * qty
+              )
+            );
+            const unitPrice =
+              row.price > 0
+                ? Math.round(row.price)
+                : qty > 0
+                  ? Math.round(lineTotal / qty)
+                  : 0;
+
+            const itemId = sanitizeId(`item-${idx + 1}-${product.id}`, 'item');
+            txBatch.set(doc(db, 'transactions', txId, 'items', itemId), {
+              ownerId,
+              transactionId: txId,
+              productId: product.id,
+              name: product.name,
+              unitPrice,
+              qty,
+              lineTotal,
+              createdAt: serverTimestamp(),
+            });
+
+            const slId = sanitizeId(`sl-${txId}-${idx + 1}`, 'sl');
+            txBatch.set(doc(db, 'salesLines', slId), {
+              ownerId,
+              transactionId: txId,
+              branchId: branch.id,
+              branchName: branch.name,
+              productId: product.id,
+              productSku: product.sku,
+              productName: product.name,
+              category: product.category,
+              qty,
+              unitPrice,
+              lineTotal,
+              saleYear,
+              saleMonth,
+              source: 'import',
+              createdAt: serverTimestamp(),
+            });
+
+            salesLinesImported += 1;
+          });
+
+          await txBatch.commit();
+        }
+      }
+    }
+
+    return {
+      branchesCreated,
+      productsUpserted,
+      stocksUpdated,
+      salesLinesImported,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'importCatalog');
+  }
 }
