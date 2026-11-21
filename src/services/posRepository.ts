@@ -3,6 +3,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   onSnapshot,
   query,
@@ -20,6 +21,9 @@ import {
   PaymentMethod,
   Product,
   SimpleTransaction,
+  StaffAccount,
+  StaffRole,
+  UserProfile,
   VoucherDef,
 } from '../types/pos';
 
@@ -28,8 +32,11 @@ const ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const SKU_MAX = 32;
 const BARCODE_MAX = 64;
 const NAME_MAX = 100;
+const DISPLAY_NAME_MAX = 80;
+const USERNAME_MAX = 40;
 const IMAGE_MAX = 300;
 const LABEL_MAX = 100;
+const VOUCHER_LABEL_MAX = 40;
 const VALID_CATEGORIES = new Set(['Makanan', 'Minuman', 'Pastry', 'Combo']);
 
 function sanitizeId(raw: string, fallbackPrefix: string): string {
@@ -43,26 +50,120 @@ function sanitizeCode(raw: string, maxLen: number, fallback: string): string {
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
+function sanitizeUsername(raw: string): string {
+  const cleaned = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '')
+    .slice(0, USERNAME_MAX);
+  return cleaned.length >= 2 ? cleaned : `user${Date.now().toString().slice(-4)}`;
+}
+
 function toIsoString(ts: unknown): string {
   if (ts instanceof Timestamp) return ts.toDate().toISOString();
   if (typeof ts === 'string') return ts;
   return new Date().toISOString();
 }
 
-export async function seedInitialDataIfNeeded(ownerId: string): Promise<void> {
+export async function ensureUserProfile(
+  ownerId: string,
+  displayName: string,
+  storeName?: string
+): Promise<void> {
+  const path = `userProfiles/${ownerId}`;
+  try {
+    const ref = doc(db, 'userProfiles', ownerId);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      await setDoc(ref, {
+        ownerId,
+        displayName: (displayName.trim() || 'Admin Utama').slice(
+          0,
+          DISPLAY_NAME_MAX
+        ),
+        storeName: (storeName?.trim() || 'KasirPOS Store').slice(0, NAME_MAX),
+        role: 'admin',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function updateUserProfile(
+  ownerId: string,
+  input: { displayName: string; storeName: string }
+): Promise<void> {
+  const path = `userProfiles/${ownerId}`;
+  try {
+    await updateDoc(doc(db, 'userProfiles', ownerId), {
+      displayName: (input.displayName.trim() || 'Admin Utama').slice(
+        0,
+        DISPLAY_NAME_MAX
+      ),
+      storeName: (input.storeName.trim() || 'KasirPOS Store').slice(0, NAME_MAX),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export function subscribeUserProfile(
+  ownerId: string,
+  onData: (profile: UserProfile | null) => void,
+  onError: (err: Error) => void
+): () => void {
+  const path = `userProfiles/${ownerId}`;
+  return onSnapshot(
+    doc(db, 'userProfiles', ownerId),
+    (snap) => {
+      if (!snap.exists()) {
+        onData(null);
+        return;
+      }
+      const data = snap.data();
+      onData({
+        ownerId: String(data.ownerId ?? ownerId),
+        displayName: String(data.displayName ?? 'Admin Utama'),
+        storeName: String(data.storeName ?? 'KasirPOS Store'),
+        role: 'admin',
+        createdAt: toIsoString(data.createdAt),
+      });
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, path);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    }
+  );
+}
+
+export async function seedInitialDataIfNeeded(
+  ownerId: string,
+  ownerDisplayName: string
+): Promise<void> {
   if (!ID_PATTERN.test(ownerId)) return;
 
-  // Check if user already has products in Firestore
   const productsPath = 'products';
   try {
-    const prodSnap = await getDocs(
-      query(collection(db, productsPath), where('ownerId', '==', ownerId))
-    );
-    const vouchSnap = await getDocs(
-      query(collection(db, 'vouchers'), where('ownerId', '==', ownerId))
-    );
+    const [prodSnap, vouchSnap, staffSnap] = await Promise.all([
+      getDocs(
+        query(collection(db, productsPath), where('ownerId', '==', ownerId))
+      ),
+      getDocs(
+        query(collection(db, 'vouchers'), where('ownerId', '==', ownerId))
+      ),
+      getDocs(
+        query(collection(db, 'staffAccounts'), where('ownerId', '==', ownerId))
+      ),
+    ]);
 
-    if (prodSnap.empty || vouchSnap.empty) {
+    if (prodSnap.empty || vouchSnap.empty || staffSnap.empty) {
       const batch = writeBatch(db);
 
       if (prodSnap.empty) {
@@ -90,8 +191,11 @@ export async function seedInitialDataIfNeeded(ownerId: string): Promise<void> {
           );
           batch.set(doc(db, 'vouchers', docId), {
             ownerId,
-            code: v.code.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 32),
-            label: v.label.trim().slice(0, 40),
+            code: v.code
+              .toUpperCase()
+              .replace(/[^A-Z0-9_-]/g, '')
+              .slice(0, 32),
+            label: v.label.trim().slice(0, VOUCHER_LABEL_MAX),
             type: v.type === 'fixed' ? 'fixed' : 'percent',
             value: Math.max(0, Math.round(v.value)),
             minSubtotal: Math.max(0, Math.round(v.minSubtotal ?? 0)),
@@ -100,6 +204,33 @@ export async function seedInitialDataIfNeeded(ownerId: string): Promise<void> {
             updatedAt: serverTimestamp(),
           });
         }
+      }
+
+      if (staffSnap.empty) {
+        const ownerStaffId = sanitizeId(`${ownerId.slice(0, 8)}-admin`, 'stf');
+        batch.set(doc(db, 'staffAccounts', ownerStaffId), {
+          ownerId,
+          displayName: (ownerDisplayName.trim() || 'Admin Utama').slice(
+            0,
+            DISPLAY_NAME_MAX
+          ),
+          username: 'admin',
+          role: 'admin',
+          active: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        const kasirStaffId = sanitizeId(`${ownerId.slice(0, 8)}-kasir1`, 'stf');
+        batch.set(doc(db, 'staffAccounts', kasirStaffId), {
+          ownerId,
+          displayName: 'Kasir Shift 1',
+          username: 'kasir1',
+          role: 'kasir',
+          active: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
       }
 
       await batch.commit();
@@ -156,21 +287,59 @@ export function subscribeVouchers(
   return onSnapshot(
     q,
     (snapshot) => {
-      const list: VoucherDef[] = snapshot.docs
-        .map((d) => {
-          const data = d.data();
-          return {
-            code: String(data.code ?? ''),
-            label: String(data.label ?? ''),
-            type: (data.type === 'fixed' ? 'fixed' : 'percent') as
-              | 'percent'
-              | 'fixed',
-            value: Number(data.value ?? 0),
-            minSubtotal: Number(data.minSubtotal ?? 0) || undefined,
-            active: Boolean(data.active ?? true),
-          };
-        })
-        .filter((v) => v.active);
+      const list: VoucherDef[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          code: String(data.code ?? ''),
+          label: String(data.label ?? ''),
+          type: (data.type === 'fixed' ? 'fixed' : 'percent') as
+            | 'percent'
+            | 'fixed',
+          value: Number(data.value ?? 0),
+          minSubtotal: Number(data.minSubtotal ?? 0) || undefined,
+          active: Boolean(data.active ?? true),
+        };
+      });
+      list.sort((a, b) => a.code.localeCompare(b.code));
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    }
+  );
+}
+
+export function subscribeStaffAccounts(
+  ownerId: string,
+  onData: (staff: StaffAccount[]) => void,
+  onError: (err: Error) => void
+): () => void {
+  const path = 'staffAccounts';
+  const q = query(collection(db, path), where('ownerId', '==', ownerId));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: StaffAccount[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ownerId: String(data.ownerId ?? ownerId),
+          displayName: String(data.displayName ?? ''),
+          username: String(data.username ?? ''),
+          role: (data.role === 'admin' ? 'admin' : 'kasir') as StaffRole,
+          active: Boolean(data.active ?? true),
+          createdAt: toIsoString(data.createdAt),
+        };
+      });
+      list.sort((a, b) => {
+        if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
+        return a.displayName.localeCompare(b.displayName);
+      });
       onData(list);
     },
     (error) => {
@@ -198,6 +367,7 @@ export function subscribeTransactions(
         return {
           id: d.id,
           invoiceNo: String(data.invoiceNo ?? d.id),
+          cashierName: String(data.cashierName ?? 'Admin'),
           items: [],
           totalQty: Number(data.totalQty ?? 0),
           subtotal: Number(data.subtotal ?? 0),
@@ -264,7 +434,11 @@ export async function saveProductToFirestore(
     category: Product['category'];
   }
 ): Promise<void> {
-  const sku = sanitizeCode(input.sku, SKU_MAX, `SKU-${Date.now().toString().slice(-4)}`);
+  const sku = sanitizeCode(
+    input.sku,
+    SKU_MAX,
+    `SKU-${Date.now().toString().slice(-4)}`
+  );
   const barcode = sanitizeCode(
     input.barcode,
     BARCODE_MAX,
@@ -277,9 +451,7 @@ export async function saveProductToFirestore(
     ? input.category
     : 'Makanan';
 
-  if (!name) {
-    throw new Error('Nama produk tidak boleh kosong.');
-  }
+  if (!name) throw new Error('Nama produk tidak boleh kosong.');
 
   if (input.id) {
     const path = `products/${input.id}`;
@@ -321,10 +493,159 @@ export async function saveProductToFirestore(
   }
 }
 
-export async function deleteProductFromFirestore(productId: string): Promise<void> {
+export async function deleteProductFromFirestore(
+  productId: string
+): Promise<void> {
   const path = `products/${productId}`;
   try {
     await deleteDoc(doc(db, 'products', productId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function saveVoucherToFirestore(
+  ownerId: string,
+  input: {
+    id?: string;
+    code: string;
+    label: string;
+    type: 'percent' | 'fixed';
+    value: number;
+    minSubtotal: number;
+    active: boolean;
+  }
+): Promise<void> {
+  const code = input.code
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 32);
+  if (code.length < 2) {
+    throw new Error('Kode voucher minimal 2 karakter (huruf/angka).');
+  }
+  const type = input.type === 'fixed' ? 'fixed' : 'percent';
+  const value =
+    type === 'percent'
+      ? Math.min(100, Math.max(1, Math.round(input.value)))
+      : Math.min(1000000000, Math.max(0, Math.round(input.value)));
+  const minSubtotal = Math.min(
+    1000000000,
+    Math.max(0, Math.round(input.minSubtotal))
+  );
+  const label = (
+    input.label.trim() ||
+    (type === 'percent' ? `${value}%` : `Rp ${Math.round(value / 1000)}rb`)
+  ).slice(0, VOUCHER_LABEL_MAX);
+
+  if (input.id) {
+    const path = `vouchers/${input.id}`;
+    try {
+      await updateDoc(doc(db, 'vouchers', input.id), {
+        code,
+        label,
+        type,
+        value,
+        minSubtotal,
+        active: Boolean(input.active),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+    return;
+  }
+
+  const newId = sanitizeId(
+    `${ownerId.slice(0, 8)}-vch-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+    'vch'
+  );
+  const path = `vouchers/${newId}`;
+  try {
+    await setDoc(doc(db, 'vouchers', newId), {
+      ownerId,
+      code,
+      label,
+      type,
+      value,
+      minSubtotal,
+      active: Boolean(input.active),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function deleteVoucherFromFirestore(
+  voucherId: string
+): Promise<void> {
+  const path = `vouchers/${voucherId}`;
+  try {
+    await deleteDoc(doc(db, 'vouchers', voucherId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function saveStaffAccountToFirestore(
+  ownerId: string,
+  input: {
+    id?: string;
+    displayName: string;
+    username: string;
+    role: StaffRole;
+    active: boolean;
+  }
+): Promise<void> {
+  const displayName = input.displayName.trim().slice(0, DISPLAY_NAME_MAX);
+  if (!displayName) throw new Error('Nama pengguna wajib diisi.');
+  const username = sanitizeUsername(input.username || displayName);
+  const role: StaffRole = input.role === 'admin' ? 'admin' : 'kasir';
+
+  if (input.id) {
+    const path = `staffAccounts/${input.id}`;
+    try {
+      await updateDoc(doc(db, 'staffAccounts', input.id), {
+        displayName,
+        username,
+        role,
+        active: Boolean(input.active),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+    return;
+  }
+
+  const newId = sanitizeId(
+    `${ownerId.slice(0, 8)}-stf-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+    'stf'
+  );
+  const path = `staffAccounts/${newId}`;
+  try {
+    await setDoc(doc(db, 'staffAccounts', newId), {
+      ownerId,
+      displayName,
+      username,
+      role,
+      active: Boolean(input.active),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function deleteStaffAccountFromFirestore(
+  staffId: string
+): Promise<void> {
+  const path = `staffAccounts/${staffId}`;
+  try {
+    await deleteDoc(doc(db, 'staffAccounts', staffId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
@@ -334,6 +655,7 @@ export async function createTransactionAtomic(
   ownerId: string,
   params: {
     invoiceNo: string;
+    cashierName: string;
     items: CartItem[];
     subtotal: number;
     discountMode: DiscountMode;
@@ -350,6 +672,10 @@ export async function createTransactionAtomic(
     'tx'
   );
   const invoiceNo = sanitizeCode(params.invoiceNo, 32, 'INV-0001');
+  const cashierName = (params.cashierName.trim() || 'Admin').slice(
+    0,
+    DISPLAY_NAME_MAX
+  );
   const totalQty = params.items.reduce((s, i) => s + i.qty, 0);
 
   const txPath = `transactions/${transactionId}`;
@@ -358,6 +684,7 @@ export async function createTransactionAtomic(
   batch.set(doc(db, 'transactions', transactionId), {
     ownerId,
     invoiceNo,
+    cashierName,
     itemCount: Math.max(1, params.items.length),
     totalQty: Math.max(1, totalQty),
     subtotal: Math.max(0, Math.round(params.subtotal)),
@@ -397,6 +724,7 @@ export async function createTransactionAtomic(
   return {
     id: transactionId,
     invoiceNo,
+    cashierName,
     items: params.items,
     totalQty,
     subtotal: Math.max(0, Math.round(params.subtotal)),

@@ -11,10 +11,6 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isVerified() {
-      return isSignedIn() && request.auth.token.email_verified == true;
-    }
-
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -28,10 +24,44 @@ service cloud.firestore {
     }
 
     function isOwner(ownerId) {
-      return isVerified() && ownerId == request.auth.uid;
+      return isSignedIn() && ownerId == request.auth.uid;
     }
 
     // ---------- Validation Blueprints ----------
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'displayName', 'storeName', 'role', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'displayName', 'storeName', 'role', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 100
+        && data.role is string && data.role == 'admin'
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStaffAccount(data) {
+      return data.keys().hasAll([
+          'ownerId', 'displayName', 'username', 'role', 'active', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'displayName', 'username', 'role', 'active', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.username is string && data.username.size() >= 2 && data.username.size() <= 40 && data.username.matches('^[a-zA-Z0-9._\\-]+$')
+        && data.role is string && data.role in ['admin', 'kasir']
+        && data.active is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidProduct(data) {
       return data.keys().hasAll([
           'ownerId', 'sku', 'barcode', 'name', 'price', 'image', 'category', 'createdAt', 'updatedAt'
@@ -73,18 +103,19 @@ service cloud.firestore {
 
     function isValidTransaction(data) {
       return data.keys().hasAll([
-          'ownerId', 'invoiceNo', 'itemCount', 'totalQty', 'subtotal', 'discountMode',
+          'ownerId', 'invoiceNo', 'cashierName', 'itemCount', 'totalQty', 'subtotal', 'discountMode',
           'discountAmount', 'adjustmentLabel', 'grandTotal', 'paymentMethod',
           'amountPaid', 'change', 'createdAt'
         ])
         && data.keys().hasOnly([
-          'ownerId', 'invoiceNo', 'itemCount', 'totalQty', 'subtotal', 'discountMode',
+          'ownerId', 'invoiceNo', 'cashierName', 'itemCount', 'totalQty', 'subtotal', 'discountMode',
           'discountAmount', 'adjustmentLabel', 'grandTotal', 'paymentMethod',
           'amountPaid', 'change', 'createdAt'
         ])
         && isValidId(data.ownerId)
         && data.ownerId == request.auth.uid
         && data.invoiceNo is string && data.invoiceNo.size() >= 3 && data.invoiceNo.size() <= 32 && data.invoiceNo.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.cashierName is string && data.cashierName.size() >= 1 && data.cashierName.size() <= 80
         && data.itemCount is number && data.itemCount >= 1 && data.itemCount <= 500
         && data.totalQty is number && data.totalQty >= 1 && data.totalQty <= 10000
         && data.subtotal is number && data.subtotal >= 0 && data.subtotal <= 1000000000
@@ -117,18 +148,71 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    // ---------- User Profiles Collection ----------
+    match /userProfiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidUserProfile(incoming(), userId)
+        && isOwner(existing().ownerId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().role == existing().role
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'storeName', 'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // ---------- Staff Accounts Collection ----------
+    match /staffAccounts/{staffId} {
+      allow get: if isSignedIn() && isValidId(staffId) && isOwner(existing().ownerId);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && isValidId(staffId)
+        && isValidStaffAccount(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(staffId)
+        && isValidStaffAccount(incoming())
+        && isOwner(existing().ownerId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'username', 'role', 'active', 'updatedAt'
+        ]);
+
+      allow delete: if isSignedIn() && isValidId(staffId) && isOwner(existing().ownerId);
+    }
+
     // ---------- Products Collection ----------
     match /products/{productId} {
-      allow get: if isVerified() && isValidId(productId) && isOwner(existing().ownerId);
-      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow get: if isSignedIn() && isValidId(productId) && isOwner(existing().ownerId);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
 
-      allow create: if isVerified()
+      allow create: if isSignedIn()
         && isValidId(productId)
         && isValidProduct(incoming())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
-      allow update: if isVerified()
+      allow update: if isSignedIn()
         && isValidId(productId)
         && isValidProduct(incoming())
         && isOwner(existing().ownerId)
@@ -139,21 +223,21 @@ service cloud.firestore {
           'sku', 'barcode', 'name', 'price', 'image', 'category', 'updatedAt'
         ]);
 
-      allow delete: if isVerified() && isValidId(productId) && isOwner(existing().ownerId);
+      allow delete: if isSignedIn() && isValidId(productId) && isOwner(existing().ownerId);
     }
 
     // ---------- Vouchers Collection ----------
     match /vouchers/{voucherId} {
-      allow get: if isVerified() && isValidId(voucherId) && isOwner(existing().ownerId);
-      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow get: if isSignedIn() && isValidId(voucherId) && isOwner(existing().ownerId);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
 
-      allow create: if isVerified()
+      allow create: if isSignedIn()
         && isValidId(voucherId)
         && isValidVoucher(incoming())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
-      allow update: if isVerified()
+      allow update: if isSignedIn()
         && isValidId(voucherId)
         && isValidVoucher(incoming())
         && isOwner(existing().ownerId)
@@ -164,15 +248,15 @@ service cloud.firestore {
           'code', 'label', 'type', 'value', 'minSubtotal', 'active', 'updatedAt'
         ]);
 
-      allow delete: if isVerified() && isValidId(voucherId) && isOwner(existing().ownerId);
+      allow delete: if isSignedIn() && isValidId(voucherId) && isOwner(existing().ownerId);
     }
 
     // ---------- Transactions Collection (Immutable Ledger) ----------
     match /transactions/{transactionId} {
-      allow get: if isVerified() && isValidId(transactionId) && isOwner(existing().ownerId);
-      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow get: if isSignedIn() && isValidId(transactionId) && isOwner(existing().ownerId);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
 
-      allow create: if isVerified()
+      allow create: if isSignedIn()
         && isValidId(transactionId)
         && isValidTransaction(incoming())
         && incoming().createdAt == request.time;
@@ -181,18 +265,18 @@ service cloud.firestore {
 
       // ---------- Transaction Line Items Subcollection ----------
       match /items/{itemId} {
-        allow get: if isVerified()
+        allow get: if isSignedIn()
           && isValidId(transactionId)
           && isValidId(itemId)
           && isOwner(existing().ownerId)
           && get(/databases/$(database)/documents/transactions/$(transactionId)).data.ownerId == request.auth.uid;
 
-        allow list: if isVerified()
+        allow list: if isSignedIn()
           && isValidId(transactionId)
           && existing().ownerId == request.auth.uid
           && existing().transactionId == transactionId;
 
-        allow create: if isVerified()
+        allow create: if isSignedIn()
           && isValidId(transactionId)
           && isValidId(itemId)
           && isValidTransactionItem(incoming(), transactionId)

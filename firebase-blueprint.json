@@ -1,8 +1,112 @@
 {
   "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Store owner account profile scoped strictly to the authenticated user ID (no PII stored).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the account owner.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "storeName": {
+          "type": "string",
+          "description": "Display name of the store shown on receipts.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "description": "Account role.",
+          "enum": ["admin"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "displayName",
+        "storeName",
+        "role",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StaffAccount": {
+      "title": "StaffAccount",
+      "description": "Cashier or admin operator account managed inside the Admin Dashboard.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full name of the staff user.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "username": {
+          "type": "string",
+          "description": "Short staff username handle.",
+          "minLength": 2,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9._\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "description": "Operator role.",
+          "enum": ["admin", "kasir"]
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the staff account is active."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when staff account was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when staff account was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "displayName",
+        "username",
+        "role",
+        "active",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "Product": {
       "title": "Product",
-      "description": "A sellable POS product item owned by an authenticated cashier/store user.",
+      "description": "A sellable POS product item owned by an authenticated store account.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -72,7 +176,7 @@
     },
     "Voucher": {
       "title": "Voucher",
-      "description": "A promotional discount voucher owned by an authenticated store user.",
+      "description": "A promotional discount voucher owned by an authenticated store account.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -142,7 +246,7 @@
       "properties": {
         "ownerId": {
           "type": "string",
-          "description": "Firebase Auth UID of the cashier who created the transaction.",
+          "description": "Firebase Auth UID of the store owner.",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
@@ -153,6 +257,12 @@
           "minLength": 3,
           "maxLength": 32,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "cashierName": {
+          "type": "string",
+          "description": "Name of the active cashier or admin who completed the sale.",
+          "minLength": 1,
+          "maxLength": 80
         },
         "itemCount": {
           "type": "number",
@@ -207,6 +317,7 @@
       "required": [
         "ownerId",
         "invoiceNo",
+        "cashierName",
         "itemCount",
         "totalQty",
         "subtotal",
@@ -283,6 +394,14 @@
     }
   },
   "firestore": {
+    "/userProfiles/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner store profile strictly scoped to userId == request.auth.uid."
+    },
+    "/staffAccounts/{staffId}": {
+      "schema": { "$ref": "#/entities/StaffAccount" },
+      "description": "Admin and cashier staff accounts managed in the Admin Dashboard."
+    },
     "/products/{productId}": {
       "schema": { "$ref": "#/entities/Product" },
       "description": "Store product catalog scoped per authenticated ownerId."

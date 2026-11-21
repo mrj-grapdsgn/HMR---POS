@@ -179,9 +179,11 @@ export function SimpleCheckoutModal({
 
 export function SimpleReceiptModal({
   transaction,
+  storeName = 'KasirPOS',
   onClose,
 }: {
   transaction: SimpleTransaction;
+  storeName?: string;
   onClose: () => void;
 }) {
   return (
@@ -205,10 +207,17 @@ export function SimpleReceiptModal({
             className="mx-auto w-full rounded-md border border-slate-200 bg-white p-5 font-mono text-xs text-slate-800"
           >
             <div className="border-b border-dashed border-slate-300 pb-3 text-center">
-              <div className="text-sm font-bold text-slate-900">KasirPOS</div>
+              <div className="text-sm font-bold text-slate-900">
+                {storeName}
+              </div>
               <div className="mt-0.5 text-[11px] text-slate-500">
                 {transaction.invoiceNo} · {formatDateTime(transaction.createdAt)}
               </div>
+              {transaction.cashierName && (
+                <div className="mt-0.5 text-[11px] text-slate-500">
+                  Kasir: {transaction.cashierName}
+                </div>
+              )}
             </div>
 
             <div className="space-y-2 border-b border-dashed border-slate-300 py-3">

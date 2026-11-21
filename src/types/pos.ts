@@ -2,6 +2,26 @@ export type DiscountMode = 'none' | 'fixed' | 'percent' | 'exact' | 'voucher';
 
 export type PaymentMethod = 'cash' | 'qris' | 'transfer';
 
+export type StaffRole = 'admin' | 'kasir';
+
+export interface UserProfile {
+  ownerId: string;
+  displayName: string;
+  storeName: string;
+  role: 'admin';
+  createdAt?: string;
+}
+
+export interface StaffAccount {
+  id: string;
+  ownerId: string;
+  displayName: string;
+  username: string;
+  role: StaffRole;
+  active: boolean;
+  createdAt?: string;
+}
+
 export interface Product {
   id: string;
   sku: string;
@@ -20,11 +40,13 @@ export interface CartItem {
 }
 
 export interface VoucherDef {
+  id?: string;
   code: string;
   label: string;
   type: 'percent' | 'fixed';
   value: number;
   minSubtotal?: number;
+  active?: boolean;
 }
 
 export interface DiscountConfig {
@@ -48,6 +70,7 @@ export interface SimpleTotals {
 export interface SimpleTransaction {
   id: string;
   invoiceNo: string;
+  cashierName?: string;
   items: CartItem[];
   totalQty?: number;
   subtotal: number;
