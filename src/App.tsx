@@ -797,6 +797,9 @@ export default function App() {
                     query={searchQuery}
                     onQueryChange={setSearchQuery}
                     onSelectProduct={handleSearchSelectProduct}
+                    scannerDisabled={
+                      checkoutOpen || historyOpen || Boolean(activeReceipt)
+                    }
                   />
                 </div>
 

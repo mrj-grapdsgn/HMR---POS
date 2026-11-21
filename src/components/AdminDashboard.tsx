@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   BarChart3,
   Building2,
+  Camera,
   Check,
   Download,
   FileSpreadsheet,
@@ -36,8 +37,10 @@ import {
   UserProfile,
   VoucherDef,
 } from '../types/pos';
+import { playScanBeep } from '../utils/barcodeScanner';
 import { formatDateTime, formatNumber, formatRupiah } from '../utils/format';
 import { inferCategoryFromProductName } from '../utils/productCategory';
+import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { ImportMigrationPanel } from './ImportMigrationPanel';
 import { InventoryBranchPanel } from './InventoryBranchPanel';
 import { RestockAnalyticsPanel } from './RestockAnalyticsPanel';
@@ -222,6 +225,7 @@ export function AdminDashboard({
   const [prodInitStock, setProdInitStock] = useState('10');
   const [prodSaving, setProdSaving] = useState(false);
   const [autoCatRunning, setAutoCatRunning] = useState(false);
+  const [prodBarcodeScanOpen, setProdBarcodeScanOpen] = useState(false);
 
   useEffect(() => {
     if (!prodInitBranchId && branches.length > 0) {
@@ -776,14 +780,24 @@ export function AdminDashboard({
                       <label className="mb-1 block text-xs font-semibold text-slate-600">
                         Barcode (Opsional)
                       </label>
-                      <input
-                        type="text"
-                        maxLength={64}
-                        value={prodBarcode}
-                        onChange={(e) => setProdBarcode(e.target.value)}
-                        placeholder="Otomatis ikut SKU"
-                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
-                      />
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          maxLength={64}
+                          value={prodBarcode}
+                          onChange={(e) => setProdBarcode(e.target.value)}
+                          placeholder="Scan alat / kamera"
+                          className="font-mono-num h-9 min-w-0 flex-1 rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setProdBarcodeScanOpen(true)}
+                          title="Scan barcode dengan kamera HP"
+                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-slate-50 text-slate-700 hover:border-[#1B8EE6] hover:bg-sky-50 hover:text-[#1B8EE6]"
+                        >
+                          <Camera className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
                   </div>
 
@@ -1569,6 +1583,27 @@ export function AdminDashboard({
           </div>
         </div>
       </div>
+
+      {prodBarcodeScanOpen && (
+        <BarcodeScannerModal
+          mode="capture"
+          onScanCode={(code) => {
+            const clean = code.trim();
+            playScanBeep('ok');
+            setProdBarcode(clean);
+            if (!prodSku.trim()) {
+              setProdSku(clean);
+            }
+            flashNotice(`Barcode "${clean}" berhasil dipindai`);
+            return {
+              tone: 'ok',
+              code: clean,
+              message: `Barcode "${clean}" dimasukkan ke form produk`,
+            };
+          }}
+          onClose={() => setProdBarcodeScanOpen(false)}
+        />
+      )}
     </div>
   );
 }

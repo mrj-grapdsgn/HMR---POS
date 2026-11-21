@@ -1,14 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
-  CameraOff,
+  Camera,
   CheckCircle2,
   ScanBarcode,
-  Video,
   X,
 } from 'lucide-react';
 import { Product } from '../types/pos';
+import {
+  findProductByScannedCode,
+  playScanBeep,
+} from '../utils/barcodeScanner';
 import { formatRupiah } from '../utils/format';
+import { BarcodeScannerModal, ScanFeedback } from './BarcodeScannerModal';
 
 interface ProductSearchScanProps {
   products: Product[];
@@ -17,20 +21,8 @@ interface ProductSearchScanProps {
   query: string;
   onQueryChange: (q: string) => void;
   onSelectProduct: (product: Product) => boolean;
-}
-
-interface BarcodeDetectorLike {
-  detect: (
-    source: HTMLVideoElement
-  ) => Promise<Array<{ rawValue?: string }>>;
-}
-
-declare global {
-  interface Window {
-    BarcodeDetector?: new (options?: {
-      formats?: string[];
-    }) => BarcodeDetectorLike;
-  }
+  /** Disable background USB/Bluetooth listener when another modal (checkout/receipt) is open */
+  scannerDisabled?: boolean;
 }
 
 export function ProductSearchScan({
@@ -40,6 +32,7 @@ export function ProductSearchScan({
   query,
   onQueryChange,
   onSelectProduct,
+  scannerDisabled = false,
 }: ProductSearchScanProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [highlightedIdx, setHighlightedIdx] = useState(0);
@@ -70,7 +63,7 @@ export function ProductSearchScan({
 
   useEffect(() => {
     if (!scanNotice) return;
-    const t = setTimeout(() => setScanNotice(null), 2600);
+    const t = setTimeout(() => setScanNotice(null), 2800);
     return () => clearTimeout(t);
   }, [scanNotice]);
 
@@ -87,28 +80,106 @@ export function ProductSearchScan({
     return () => document.removeEventListener('mousedown', handleOutside);
   }, []);
 
-  const pickProduct = (product: Product) => {
-    const avail = stockByProductId[product.id] ?? 0;
-    if (avail <= 0) {
-      setScanNotice({
-        text: `Stok "${product.name}" habis di ${activeBranchName || 'cabang aktif'}`,
-        tone: 'error',
+  const pickProduct = useCallback(
+    (
+      product: Product,
+      options?: { beep?: boolean; keepFocus?: boolean; prefix?: string }
+    ): ScanFeedback => {
+      const avail = stockByProductId[product.id] ?? 0;
+      if (avail <= 0) {
+        if (options?.beep) playScanBeep('error');
+        const msg = `Stok "${product.name}" habis di ${activeBranchName || 'cabang aktif'}`;
+        setScanNotice({ text: msg, tone: 'error' });
+        return { tone: 'error', message: msg, code: product.barcode || product.sku };
+      }
+      const added = onSelectProduct(product);
+      if (!added) {
+        if (options?.beep) playScanBeep('error');
+        const msg = `Qty "${product.name}" sudah mencapai sisa stok (${avail} pcs)`;
+        setScanNotice({ text: msg, tone: 'error' });
+        return { tone: 'error', message: msg, code: product.barcode || product.sku };
+      }
+      if (options?.beep) playScanBeep('ok');
+      onQueryChange('');
+      setDropdownOpen(false);
+      const msg = `${options?.prefix ? `${options.prefix}: ` : ''}${product.name} ditambahkan`;
+      setScanNotice({ text: msg, tone: 'ok' });
+      if (options?.keepFocus !== false) {
+        inputRef.current?.focus();
+      }
+      return { tone: 'ok', message: msg, code: product.barcode || product.sku };
+    },
+    [stockByProductId, activeBranchName, onSelectProduct, onQueryChange]
+  );
+
+  const handleScannedCode = useCallback(
+    (rawCode: string, source: 'camera' | 'hardware'): ScanFeedback => {
+      const clean = rawCode.trim();
+      const found = findProductByScannedCode(products, clean);
+      if (!found) {
+        playScanBeep('error');
+        const msg = `Barcode "${clean}" tidak ditemukan di katalog`;
+        setScanNotice({ text: msg, tone: 'error' });
+        return { tone: 'error', message: msg, code: clean };
+      }
+      return pickProduct(found, {
+        beep: true,
+        keepFocus: source === 'hardware',
+        prefix: source === 'hardware' ? 'Scan' : undefined,
       });
-      return;
-    }
-    const added = onSelectProduct(product);
-    if (!added) {
-      setScanNotice({
-        text: `Jumlah keranjang sudah mencapai sisa stok (${avail} pcs)`,
-        tone: 'error',
-      });
-      return;
-    }
-    onQueryChange('');
-    setDropdownOpen(false);
-    setScanNotice({ text: `${product.name} ditambahkan`, tone: 'ok' });
-    inputRef.current?.focus();
-  };
+    },
+    [products, pickProduct]
+  );
+
+  // Global USB / Bluetooth HID barcode scanner listener.
+  // Physical scanners emit characters rapidly (< 85ms apart) ending with Enter or Tab.
+  // Works even when the cashier didn't click inside the search input first.
+  useEffect(() => {
+    if (scannerDisabled || cameraOpen) return;
+
+    let buffer = '';
+    let lastKeyTime = 0;
+
+    const onGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      if (
+        tag === 'input' ||
+        tag === 'textarea' ||
+        tag === 'select' ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastKeyTime > 120) {
+        buffer = '';
+      }
+
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        if (buffer.length >= 4) {
+          e.preventDefault();
+          const scanned = buffer;
+          buffer = '';
+          handleScannedCode(scanned, 'hardware');
+        } else {
+          buffer = '';
+        }
+        return;
+      }
+
+      if (e.key.length === 1) {
+        buffer += e.key;
+        lastKeyTime = now;
+      }
+    };
+
+    window.addEventListener('keydown', onGlobalKeyDown);
+    return () => window.removeEventListener('keydown', onGlobalKeyDown);
+  }, [scannerDisabled, cameraOpen, handleScannedCode]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown') {
@@ -125,35 +196,30 @@ export function ProductSearchScan({
       );
     } else if (e.key === 'Escape') {
       setDropdownOpen(false);
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      const raw = query.trim().toLowerCase();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      const raw = query.trim();
       if (!raw) return;
 
-      const exact = products.find(
-        (p) =>
-          p.barcode.toLowerCase() === raw || p.sku.toLowerCase() === raw
-      );
+      const exact = findProductByScannedCode(products, raw);
       if (exact) {
-        pickProduct(exact);
+        e.preventDefault();
+        pickProduct(exact, { beep: true, keepFocus: true });
         return;
       }
 
-      if (matches[highlightedIdx]) {
-        pickProduct(matches[highlightedIdx]);
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (matches[highlightedIdx]) {
+          pickProduct(matches[highlightedIdx], { beep: true, keepFocus: true });
+        } else {
+          playScanBeep('error');
+          setScanNotice({
+            text: `Barcode / produk "${raw}" tidak ditemukan`,
+            tone: 'error',
+          });
+          onQueryChange('');
+        }
       }
-    }
-  };
-
-  const handleCameraDetected = (code: string) => {
-    const clean = code.trim().toLowerCase();
-    const found = products.find(
-      (p) =>
-        p.barcode.toLowerCase() === clean || p.sku.toLowerCase() === clean
-    );
-    if (found) {
-      setCameraOpen(false);
-      pickProduct(found);
     }
   };
 
@@ -165,7 +231,7 @@ export function ProductSearchScan({
           htmlFor="cari-scan-barang"
           className="text-[11px] font-bold tracking-wider text-slate-500 uppercase"
         >
-          CARI / SCAN BARANG
+          CARI / SCAN BARANG (USB / KAMERA)
         </label>
         {scanNotice && (
           <span
@@ -191,7 +257,7 @@ export function ProductSearchScan({
             inputRef.current?.focus();
             setDropdownOpen(true);
           }}
-          title="Fokus input barcode / pencarian"
+          title="Siap terima scan alat barcode USB / Bluetooth"
           className="flex w-11 shrink-0 items-center justify-center border-r border-slate-700/80 bg-[#101820] text-[#00C4A7] transition-colors hover:bg-[#16222D]"
         >
           <ScanBarcode className="h-4.5 w-4.5" />
@@ -209,7 +275,7 @@ export function ProductSearchScan({
               setDropdownOpen(true);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Ketik/Scan Kode Item atau Nama Barang..."
+            placeholder="Scan alat USB/Bluetooth atau ketik SKU / Nama..."
             autoComplete="off"
             className="h-full w-full bg-transparent px-3 text-sm font-medium text-white placeholder:text-slate-400 focus:outline-none"
           />
@@ -231,10 +297,11 @@ export function ProductSearchScan({
         <button
           type="button"
           onClick={() => setCameraOpen(true)}
-          title="Scan barcode dengan kamera"
-          className="flex w-12 shrink-0 items-center justify-center border-l border-slate-700/80 bg-[#12393B] text-[#00D1B2] transition-colors hover:bg-[#174A4D] active:scale-95"
+          title="Scan barcode dengan kamera HP / webcam"
+          className="flex shrink-0 items-center justify-center gap-1.5 border-l border-slate-700/80 bg-[#12393B] px-3 text-xs font-bold text-[#00D1B2] transition-colors hover:bg-[#174A4D] active:scale-95"
         >
-          <Video className="h-4.5 w-4.5 fill-current" />
+          <Camera className="h-4 w-4" />
+          <span className="hidden sm:inline">Kamera</span>
         </button>
       </div>
 
@@ -244,7 +311,7 @@ export function ProductSearchScan({
           {matches.length === 0 ? (
             <div className="px-3.5 py-4 text-center text-xs text-slate-500">
               Barang &ldquo;{query}&rdquo; tidak ditemukan. Coba nama produk,
-              Kode Item, atau barcode.
+              Kode Item, atau scan barcode.
             </div>
           ) : (
             matches.map((p, idx) => {
@@ -259,7 +326,7 @@ export function ProductSearchScan({
                   onMouseEnter={() => setHighlightedIdx(idx)}
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    if (!outOfStock) pickProduct(p);
+                    if (!outOfStock) pickProduct(p, { beep: false });
                   }}
                   className={`flex w-full items-center justify-between gap-2.5 px-3 py-2 text-left transition-colors ${
                     outOfStock
@@ -312,178 +379,16 @@ export function ProductSearchScan({
         </div>
       )}
 
-      {/* Camera Barcode Scanner Modal */}
+      {/* Cross-Browser Camera & Hardware Barcode Scanner Modal */}
       {cameraOpen && (
-        <CameraScannerModal
+        <BarcodeScannerModal
+          mode="pos"
           products={products}
           stockByProductId={stockByProductId}
-          onDetected={handleCameraDetected}
+          onScanCode={(code) => handleScannedCode(code, 'camera')}
           onClose={() => setCameraOpen(false)}
         />
       )}
-    </div>
-  );
-}
-
-function CameraScannerModal({
-  products,
-  stockByProductId,
-  onDetected,
-  onClose,
-}: {
-  products: Product[];
-  stockByProductId: Record<string, number>;
-  onDetected: (code: string) => void;
-  onClose: () => void;
-}) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [detectorSupported, setDetectorSupported] = useState(true);
-
-  useEffect(() => {
-    let stream: MediaStream | null = null;
-    let rafId = 0;
-    let active = true;
-
-    async function startCamera() {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setCameraError('Browser tidak mendukung akses kamera.');
-        return;
-      }
-
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-        });
-        if (!active) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
-
-        if (window.BarcodeDetector) {
-          const detector = new window.BarcodeDetector({
-            formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code'],
-          });
-
-          const scanLoop = async () => {
-            if (!active || !videoRef.current) return;
-            try {
-              if (videoRef.current.readyState >= 2) {
-                const results = await detector.detect(videoRef.current);
-                if (results.length > 0 && results[0].rawValue) {
-                  onDetected(results[0].rawValue);
-                  return;
-                }
-              }
-            } catch {
-              // ignore single frame decode errors
-            }
-            rafId = requestAnimationFrame(scanLoop);
-          };
-          rafId = requestAnimationFrame(scanLoop);
-        } else {
-          setDetectorSupported(false);
-        }
-      } catch {
-        setCameraError(
-          'Kamera tidak tersedia atau izin ditolak. Anda tetap bisa memilih barcode uji di bawah ini.'
-        );
-      }
-    }
-
-    startCamera();
-
-    return () => {
-      active = false;
-      if (rafId) cancelAnimationFrame(rafId);
-      if (stream) stream.getTracks().forEach((t) => t.stop());
-    };
-  }, [onDetected]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-[1px]">
-      <div className="flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-xl border border-slate-700 bg-[#141E27] text-white shadow-2xl">
-        <div className="flex items-center justify-between border-b border-slate-700/80 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <ScanBarcode className="h-4.5 w-4.5 text-[#00D1B2]" />
-            <h3 className="text-sm font-bold">Scan Barcode Kamera</h3>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Tutup kamera"
-            className="flex h-8 w-8 items-center justify-center rounded-full text-slate-300 hover:bg-white/10"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="relative aspect-[16/10] w-full overflow-hidden bg-slate-950">
-          {cameraError ? (
-            <div className="flex h-full flex-col items-center justify-center px-6 text-center text-slate-300">
-              <CameraOff className="mb-2 h-8 w-8 text-slate-500" />
-              <p className="text-xs leading-relaxed">{cameraError}</p>
-            </div>
-          ) : (
-            <>
-              <video
-                ref={videoRef}
-                muted
-                playsInline
-                className="h-full w-full object-cover"
-              />
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                <div className="relative h-28 w-56 rounded-lg border-2 border-[#00D1B2]/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]">
-                  <div className="absolute top-1/2 right-2 left-2 h-0.5 bg-[#00D1B2]" />
-                </div>
-              </div>
-              {!detectorSupported && (
-                <div className="absolute right-2 bottom-2 left-2 rounded bg-slate-900/85 px-2.5 py-1.5 text-center text-[11px] text-amber-300">
-                  Auto-decode kamera tidak didukung browser ini — gunakan pilih
-                  cepat barcode di bawah.
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        <div className="pos-scroll max-h-56 overflow-y-auto p-3.5">
-          <div className="mb-2 text-[11px] font-bold tracking-wider text-slate-400 uppercase">
-            Simulasi Scan Barcode Cepat
-          </div>
-          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-            {products.slice(0, 8).map((p) => {
-              const stock = stockByProductId[p.id] ?? 0;
-              const disabled = stock <= 0;
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => onDetected(p.barcode)}
-                  className="flex items-center justify-between rounded-lg border border-slate-700/80 bg-[#1B2834] px-2.5 py-2 text-left transition-colors hover:border-[#00C4A7] hover:bg-[#1F3140] disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                  <div className="min-w-0 pr-2">
-                    <div className="truncate text-xs font-semibold text-white">
-                      {p.name}
-                    </div>
-                    <div className="font-mono-num text-[10px] text-[#00D1B2]">
-                      {p.barcode} · {disabled ? 'Habis' : `${stock} pcs`}
-                    </div>
-                  </div>
-                  <span className="font-mono-num shrink-0 text-[11px] font-bold text-slate-200">
-                    {formatRupiah(p.price)}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
