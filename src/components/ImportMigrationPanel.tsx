@@ -60,7 +60,7 @@ export function ImportMigrationPanel({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [sheetUrl, setSheetUrl] = useState('');
-  const [sheetTabName, setSheetTabName] = useState('');
+  const [sheetTabName, setSheetTabName] = useState('monitoring_stok');
   const [defaultBranch, setDefaultBranch] = useState(
     branches[0]?.name ?? 'CFD Senayan'
   );
@@ -463,14 +463,38 @@ export function ImportMigrationPanel({
               className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
             />
             <div>
-              <label className="mb-1 block text-[11px] font-semibold text-slate-600">
-                Nama Tab / Sheet Spesifik (Opsional)
-              </label>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="block text-[11px] font-semibold text-slate-600">
+                  Nama Tab / Sheet Spesifik (Opsional)
+                </label>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setSheetTabName('monitoring_stok')}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition-colors ${
+                      sheetTabName === 'monitoring_stok'
+                        ? 'bg-[#1B8EE6] text-white'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    monitoring_stok
+                  </button>
+                  {sheetTabName && (
+                    <button
+                      type="button"
+                      onClick={() => setSheetTabName('')}
+                      className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 hover:bg-slate-200"
+                    >
+                      Semua Tab
+                    </button>
+                  )}
+                </div>
+              </div>
               <input
                 type="text"
                 value={sheetTabName}
                 onChange={(e) => setSheetTabName(e.target.value)}
-                placeholder="Contoh: Master Produk, Stok, atau Transaksi"
+                placeholder="Contoh: monitoring_stok, Master Produk, atau Transaksi"
                 className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
               />
             </div>

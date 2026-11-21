@@ -283,6 +283,9 @@ function inferBranchFromSheetName(sheetName: string): string | null {
     strippedLower.includes('rekapan') ||
     strippedLower.includes('transaksi') ||
     strippedLower.includes('penjualan') ||
+    strippedLower.includes('monitoring') ||
+    strippedLower.includes('stok') ||
+    strippedLower.includes('stock') ||
     strippedLower.includes('master') ||
     strippedLower.includes('produk') ||
     strippedLower.includes('sheet')
@@ -498,6 +501,7 @@ export function parseSpreadsheetMatrix(
     'saldo awal',
     'qty awal',
     'stok masuk',
+    'awal',
   ]);
   const idxCurrentStock = findColIndex(
     headers,
@@ -510,12 +514,13 @@ export function parseSpreadsheetMatrix(
       'saldo akhir',
       'qty akhir',
       'sisa',
+      'akhir',
       'stok',
       'stock',
       'qty stok',
       'available',
     ],
-    ['stok awal', 'stock awal', 'status', 'restok', '%', 'terjual']
+    ['stok awal', 'stock awal', 'status', 'restok', '%', 'terjual', 'keluar', 'masuk']
   );
   const idxQtySold = findColIndex(
     headers,
@@ -529,6 +534,10 @@ export function parseSpreadsheetMatrix(
       'qty',
       'jumlah',
       'sold',
+      'stok keluar',
+      'barang keluar',
+      'qty keluar',
+      'keluar',
     ],
     ['qty awal', 'qty akhir', 'qty stok', '%', 'total qty', 'jumlah stok']
   );
@@ -1090,9 +1099,47 @@ export async function fetchAndParseSheetUrl(
         'csv',
         xlsxDownloadUrl
       );
+
+      // If default tab was a Dashboard summary (e.g. only 13 Top products), automatically probe 'monitoring_stok' via CORS-friendly gviz API
+      if (sheetId && result.isDashboardSummaryOnly) {
+        try {
+          const probeUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('monitoring_stok')}`;
+          const probeRes = await fetch(probeUrl);
+          if (probeRes.ok) {
+            const probeText = await probeRes.text();
+            if (
+              probeText &&
+              !isLikelyHtmlResponse(probeText) &&
+              probeText.trim() !== text.trim()
+            ) {
+              const probeWb = XLSX.read(probeText, { type: 'string' });
+              const fk = probeWb.SheetNames[0];
+              if (fk) {
+                probeWb.Sheets['monitoring_stok'] = probeWb.Sheets[fk];
+                if (fk !== 'monitoring_stok') delete probeWb.Sheets[fk];
+                probeWb.SheetNames[0] = 'monitoring_stok';
+              }
+              const probeResult = parseWorkbook(
+                probeWb,
+                defaultBranchName,
+                defaultMonth,
+                defaultYear,
+                'csv',
+                xlsxDownloadUrl
+              );
+              if (probeResult.rows.length > 0 && !probeResult.isDashboardSummaryOnly) {
+                return probeResult;
+              }
+            }
+          }
+        } catch {
+          // Ignore probe failure and fall back to default result with guidance
+        }
+      }
+
       if (sheetId && result.tabs.length <= 1) {
         result.warnings.push(
-          'Browser hanya bisa mengambil 1 tab via CSV dari link Google Sheet (pembatasan CORS Google). Untuk mengimpor SEMUA tab & ratusan produk sekaligus, klik tombol "Unduh Semua Tab (.xlsx)" di bawah lalu unggah file .xlsx tersebut, atau ketik Nama Tab daftar produk lengkap Anda.'
+          'Browser hanya bisa mengambil 1 tab via CSV dari link Google Sheet (pembatasan CORS Google). Untuk mengimpor SEMUA tab & ratusan produk sekaligus, klik tombol "Unduh Semua Tab (.xlsx)" di bawah lalu unggah file .xlsx tersebut, atau ketik Nama Tab daftar produk lengkap Anda (mis. monitoring_stok).'
         );
       }
       return result;
