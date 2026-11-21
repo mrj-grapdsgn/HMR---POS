@@ -1,0 +1,6 @@
+{
+  "name": "KasirPOS",
+  "description": "Sistem Point of Sale (POS) modern untuk kafe dan restoran dengan katalog produk, manajemen meja, pemindai barcode, varian menu, dan cetak struk.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

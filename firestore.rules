@@ -1,0 +1,207 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ---------- Shared Security Primitives ----------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(ownerId) {
+      return isVerified() && ownerId == request.auth.uid;
+    }
+
+    // ---------- Validation Blueprints ----------
+    function isValidProduct(data) {
+      return data.keys().hasAll([
+          'ownerId', 'sku', 'barcode', 'name', 'price', 'image', 'category', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'sku', 'barcode', 'name', 'price', 'image', 'category', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.sku is string && data.sku.size() >= 1 && data.sku.size() <= 32 && data.sku.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.barcode is string && data.barcode.size() >= 1 && data.barcode.size() <= 64 && data.barcode.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.price is number && data.price >= 0 && data.price <= 1000000000
+        && data.image is string && data.image.size() <= 300
+        && data.category is string && data.category in ['Makanan', 'Minuman', 'Pastry', 'Combo']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVoucher(data) {
+      return data.keys().hasAll([
+          'ownerId', 'code', 'label', 'type', 'value', 'minSubtotal', 'active', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'code', 'label', 'type', 'value', 'minSubtotal', 'active', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.code is string && data.code.size() >= 2 && data.code.size() <= 32 && data.code.matches('^[A-Z0-9_\\-]+$')
+        && data.label is string && data.label.size() >= 1 && data.label.size() <= 40
+        && data.type is string && data.type in ['percent', 'fixed']
+        && data.value is number && data.value >= 0
+        && ((data.type == 'percent' && data.value <= 100) || (data.type == 'fixed' && data.value <= 1000000000))
+        && data.minSubtotal is number && data.minSubtotal >= 0 && data.minSubtotal <= 1000000000
+        && data.active is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll([
+          'ownerId', 'invoiceNo', 'itemCount', 'totalQty', 'subtotal', 'discountMode',
+          'discountAmount', 'adjustmentLabel', 'grandTotal', 'paymentMethod',
+          'amountPaid', 'change', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'invoiceNo', 'itemCount', 'totalQty', 'subtotal', 'discountMode',
+          'discountAmount', 'adjustmentLabel', 'grandTotal', 'paymentMethod',
+          'amountPaid', 'change', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.invoiceNo is string && data.invoiceNo.size() >= 3 && data.invoiceNo.size() <= 32 && data.invoiceNo.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.itemCount is number && data.itemCount >= 1 && data.itemCount <= 500
+        && data.totalQty is number && data.totalQty >= 1 && data.totalQty <= 10000
+        && data.subtotal is number && data.subtotal >= 0 && data.subtotal <= 1000000000
+        && data.discountMode is string && data.discountMode in ['none', 'fixed', 'percent', 'exact', 'voucher']
+        && data.discountAmount is number && data.discountAmount >= -1000000000 && data.discountAmount <= 1000000000
+        && data.adjustmentLabel is string && data.adjustmentLabel.size() <= 100
+        && data.grandTotal is number && data.grandTotal >= 0 && data.grandTotal <= 1000000000
+        && data.paymentMethod is string && data.paymentMethod in ['cash', 'qris', 'transfer']
+        && data.amountPaid is number && data.amountPaid >= 0 && data.amountPaid <= 1000000000
+        && data.change is number && data.change >= 0 && data.change <= 1000000000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidTransactionItem(data, transactionId) {
+      return data.keys().hasAll([
+          'ownerId', 'transactionId', 'productId', 'name', 'unitPrice', 'qty', 'lineTotal', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'transactionId', 'productId', 'name', 'unitPrice', 'qty', 'lineTotal', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.transactionId)
+        && data.transactionId == transactionId
+        && isValidId(data.productId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.unitPrice is number && data.unitPrice >= 0 && data.unitPrice <= 1000000000
+        && data.qty is number && data.qty >= 1 && data.qty <= 10000
+        && data.lineTotal is number && data.lineTotal >= 0 && data.lineTotal <= 1000000000
+        && data.createdAt is timestamp;
+    }
+
+    // ---------- Products Collection ----------
+    match /products/{productId} {
+      allow get: if isVerified() && isValidId(productId) && isOwner(existing().ownerId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+
+      allow create: if isVerified()
+        && isValidId(productId)
+        && isValidProduct(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerified()
+        && isValidId(productId)
+        && isValidProduct(incoming())
+        && isOwner(existing().ownerId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'sku', 'barcode', 'name', 'price', 'image', 'category', 'updatedAt'
+        ]);
+
+      allow delete: if isVerified() && isValidId(productId) && isOwner(existing().ownerId);
+    }
+
+    // ---------- Vouchers Collection ----------
+    match /vouchers/{voucherId} {
+      allow get: if isVerified() && isValidId(voucherId) && isOwner(existing().ownerId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+
+      allow create: if isVerified()
+        && isValidId(voucherId)
+        && isValidVoucher(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerified()
+        && isValidId(voucherId)
+        && isValidVoucher(incoming())
+        && isOwner(existing().ownerId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'code', 'label', 'type', 'value', 'minSubtotal', 'active', 'updatedAt'
+        ]);
+
+      allow delete: if isVerified() && isValidId(voucherId) && isOwner(existing().ownerId);
+    }
+
+    // ---------- Transactions Collection (Immutable Ledger) ----------
+    match /transactions/{transactionId} {
+      allow get: if isVerified() && isValidId(transactionId) && isOwner(existing().ownerId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+
+      allow create: if isVerified()
+        && isValidId(transactionId)
+        && isValidTransaction(incoming())
+        && incoming().createdAt == request.time;
+
+      allow update, delete: if false;
+
+      // ---------- Transaction Line Items Subcollection ----------
+      match /items/{itemId} {
+        allow get: if isVerified()
+          && isValidId(transactionId)
+          && isValidId(itemId)
+          && isOwner(existing().ownerId)
+          && get(/databases/$(database)/documents/transactions/$(transactionId)).data.ownerId == request.auth.uid;
+
+        allow list: if isVerified()
+          && isValidId(transactionId)
+          && existing().ownerId == request.auth.uid
+          && existing().transactionId == transactionId;
+
+        allow create: if isVerified()
+          && isValidId(transactionId)
+          && isValidId(itemId)
+          && isValidTransactionItem(incoming(), transactionId)
+          && incoming().createdAt == request.time
+          && existsAfter(/databases/$(database)/documents/transactions/$(transactionId))
+          && getAfter(/databases/$(database)/documents/transactions/$(transactionId)).data.ownerId == request.auth.uid;
+
+        allow update, delete: if false;
+      }
+    }
+  }
+}

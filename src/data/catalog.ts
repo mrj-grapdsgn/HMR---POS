@@ -1,0 +1,168 @@
+import { CartItem, DiscountConfig, Product, VoucherDef } from '../types/pos';
+
+export const PRODUCT_CATEGORIES = [
+  'Semua',
+  'Makanan',
+  'Minuman',
+  'Pastry',
+  'Combo',
+] as const;
+
+export const PRODUCTS: Product[] = [
+  {
+    id: 'chicken-wings',
+    sku: 'MKN-01',
+    barcode: '8991001001',
+    name: 'Chicken Wings',
+    price: 32000,
+    image: '/src/assets/images/chicken_wings_1795252225311.jpg',
+    category: 'Makanan',
+  },
+  {
+    id: 'chicken-stick',
+    sku: 'MKN-02',
+    barcode: '8991001002',
+    name: 'Chicken Stick',
+    price: 20000,
+    image: '/src/assets/images/chicken_stick_1795252224951.jpg',
+    category: 'Makanan',
+  },
+  {
+    id: 'chicken-popcorn',
+    sku: 'MKN-03',
+    barcode: '8991001003',
+    name: 'Chicken Popcorn',
+    price: 23000,
+    image: '/src/assets/images/chicken_popcorn_1795252225041.jpg',
+    category: 'Makanan',
+  },
+  {
+    id: 'dino-nugget',
+    sku: 'MKN-04',
+    barcode: '8991001004',
+    name: 'Dino Nugget',
+    price: 12000,
+    image: '/src/assets/images/dino_nugget_1795252224735.jpg',
+    category: 'Makanan',
+  },
+  {
+    id: 'chocolate-frapucino',
+    sku: 'MNM-01',
+    barcode: '8992001001',
+    name: 'Chocolate Frapucino',
+    price: 39000,
+    image: '/src/assets/images/chocolate_frapucino_1795252224772.jpg',
+    category: 'Minuman',
+  },
+  {
+    id: 'caramel-milkshake',
+    sku: 'MNM-02',
+    barcode: '8992001002',
+    name: 'Caramel Milkshake',
+    price: 26000,
+    image: '/src/assets/images/caramel_milkshake_1795252224562.jpg',
+    category: 'Minuman',
+  },
+  {
+    id: 'caramel-mochiato',
+    sku: 'MNM-03',
+    barcode: '8992001003',
+    name: 'Caramel Mochiato',
+    price: 30000,
+    image: '/src/assets/images/caramel_macchiato_1795252224974.jpg',
+    category: 'Minuman',
+  },
+  {
+    id: 'cha-tea-latte',
+    sku: 'MNM-04',
+    barcode: '8992001004',
+    name: 'Cha Tea Latte',
+    price: 29000,
+    image: '/src/assets/images/cha_tea_latte_1795252225620.jpg',
+    category: 'Minuman',
+  },
+  {
+    id: 'coffee-latte',
+    sku: 'MNM-05',
+    barcode: '8992001005',
+    name: 'Coffee Latte',
+    price: 30000,
+    image: '/src/assets/images/coffee_latte_1795252225785.jpg',
+    category: 'Minuman',
+  },
+  {
+    id: 'custom-cake',
+    sku: 'PST-01',
+    barcode: '8993001001',
+    name: 'Custom Cake',
+    price: 45000,
+    image: '/src/assets/images/custom_cake_1795252225528.jpg',
+    category: 'Pastry',
+  },
+  {
+    id: 'dancing-ice-cream',
+    sku: 'PST-02',
+    barcode: '8993001002',
+    name: 'Dancing Ice Cream',
+    price: 18000,
+    image: '/src/assets/images/dancing_ice_cream_1795252225889.jpg',
+    category: 'Pastry',
+  },
+  {
+    id: 'double-chocolate-doughnut',
+    sku: 'PST-03',
+    barcode: '8993001003',
+    name: 'Double Chocolate Doughnut',
+    price: 15000,
+    image: '/src/assets/images/chocolate_doughnut_1795252225464.jpg',
+    category: 'Pastry',
+  },
+  {
+    id: 'butter-croissant',
+    sku: 'PST-04',
+    barcode: '8993001004',
+    name: 'Butter Croissant',
+    price: 22000,
+    image: '/src/assets/images/butter_croissant_1795252225168.jpg',
+    category: 'Pastry',
+  },
+  {
+    id: 'combo-snack-platter',
+    sku: 'CMB-01',
+    barcode: '8994001001',
+    name: 'Combo Snack Platter',
+    price: 54000,
+    image: '/src/assets/images/combo_platter_1795252224669.jpg',
+    category: 'Combo',
+  },
+];
+
+export const VOUCHERS: VoucherDef[] = [
+  { code: 'HEMAT10', label: '10%', type: 'percent', value: 10 },
+  { code: 'POTONG15K', label: 'Rp 15rb', type: 'fixed', value: 15000, minSubtotal: 40000 },
+  { code: 'WEEKEND25', label: '25%', type: 'percent', value: 25, minSubtotal: 75000 },
+  { code: 'MEMBER20K', label: 'Rp 20rb', type: 'fixed', value: 20000, minSubtotal: 50000 },
+];
+
+export const DEFAULT_DISCOUNT: DiscountConfig = {
+  mode: 'none',
+  fixedAmount: 0,
+  percentValue: 0,
+  exactTotal: null,
+  voucherCode: '',
+};
+
+export const INITIAL_CART: CartItem[] = [
+  {
+    productId: 'chicken-wings',
+    name: 'Chicken Wings',
+    unitPrice: 32000,
+    qty: 1,
+  },
+  {
+    productId: 'chocolate-frapucino',
+    name: 'Chocolate Frapucino',
+    unitPrice: 39000,
+    qty: 2,
+  },
+];

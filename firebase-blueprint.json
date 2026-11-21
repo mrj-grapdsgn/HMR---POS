@@ -1,0 +1,303 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "A sellable POS product item owned by an authenticated cashier/store user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sku": {
+          "type": "string",
+          "description": "Short stock-keeping unit code.",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "barcode": {
+          "type": "string",
+          "description": "Numeric or alphanumeric product barcode.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the product.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "price": {
+          "type": "number",
+          "description": "Unit selling price in IDR."
+        },
+        "image": {
+          "type": "string",
+          "description": "Local asset path for product thumbnail.",
+          "minLength": 0,
+          "maxLength": 300
+        },
+        "category": {
+          "type": "string",
+          "description": "Product category.",
+          "enum": ["Makanan", "Minuman", "Pastry", "Combo"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when product was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when product was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "sku",
+        "barcode",
+        "name",
+        "price",
+        "image",
+        "category",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Voucher": {
+      "title": "Voucher",
+      "description": "A promotional discount voucher owned by an authenticated store user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "description": "Uppercase voucher code.",
+          "minLength": 2,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9_\\-]+$"
+        },
+        "label": {
+          "type": "string",
+          "description": "Short display label for the voucher.",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "type": {
+          "type": "string",
+          "description": "Discount calculation type.",
+          "enum": ["percent", "fixed"]
+        },
+        "value": {
+          "type": "number",
+          "description": "Discount percentage (1-100) or fixed IDR amount."
+        },
+        "minSubtotal": {
+          "type": "number",
+          "description": "Minimum subtotal in IDR required to apply the voucher."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the voucher is active."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when voucher was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when voucher was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "code",
+        "label",
+        "type",
+        "value",
+        "minSubtotal",
+        "active",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Immutable completed POS sale transaction header.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the cashier who created the transaction.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "invoiceNo": {
+          "type": "string",
+          "description": "Human-readable invoice identifier.",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "itemCount": {
+          "type": "number",
+          "description": "Number of distinct line items in the transaction."
+        },
+        "totalQty": {
+          "type": "number",
+          "description": "Total quantity of units sold."
+        },
+        "subtotal": {
+          "type": "number",
+          "description": "Gross subtotal before discount in IDR."
+        },
+        "discountMode": {
+          "type": "string",
+          "description": "Selected discount mode.",
+          "enum": ["none", "fixed", "percent", "exact", "voucher"]
+        },
+        "discountAmount": {
+          "type": "number",
+          "description": "Net discount or exact-price adjustment amount in IDR."
+        },
+        "adjustmentLabel": {
+          "type": "string",
+          "description": "Description of applied discount or exact price.",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "grandTotal": {
+          "type": "number",
+          "description": "Final amount charged in IDR."
+        },
+        "paymentMethod": {
+          "type": "string",
+          "description": "Payment channel used.",
+          "enum": ["cash", "qris", "transfer"]
+        },
+        "amountPaid": {
+          "type": "number",
+          "description": "Amount tendered by the customer in IDR."
+        },
+        "change": {
+          "type": "number",
+          "description": "Change returned to the customer in IDR."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when transaction was completed."
+        }
+      },
+      "required": [
+        "ownerId",
+        "invoiceNo",
+        "itemCount",
+        "totalQty",
+        "subtotal",
+        "discountMode",
+        "discountAmount",
+        "adjustmentLabel",
+        "grandTotal",
+        "paymentMethod",
+        "amountPaid",
+        "change",
+        "createdAt"
+      ]
+    },
+    "TransactionItem": {
+      "title": "TransactionItem",
+      "description": "Immutable line item belonging to a completed POS transaction.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the parent transaction owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "transactionId": {
+          "type": "string",
+          "description": "Parent transaction document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productId": {
+          "type": "string",
+          "description": "Product identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Product name snapshot at time of sale.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "unitPrice": {
+          "type": "number",
+          "description": "Unit price snapshot in IDR."
+        },
+        "qty": {
+          "type": "number",
+          "description": "Quantity purchased."
+        },
+        "lineTotal": {
+          "type": "number",
+          "description": "Calculated line subtotal (unitPrice * qty)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp matching transaction creation."
+        }
+      },
+      "required": [
+        "ownerId",
+        "transactionId",
+        "productId",
+        "name",
+        "unitPrice",
+        "qty",
+        "lineTotal",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Store product catalog scoped per authenticated ownerId."
+    },
+    "/vouchers/{voucherId}": {
+      "schema": { "$ref": "#/entities/Voucher" },
+      "description": "Promotional discount voucher codes scoped per authenticated ownerId."
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Immutable completed POS sales ledger headers scoped per ownerId."
+    },
+    "/transactions/{transactionId}/items/{itemId}": {
+      "schema": { "$ref": "#/entities/TransactionItem" },
+      "description": "Immutable line items subcollection atomically bound to a parent transaction."
+    }
+  }
+}
