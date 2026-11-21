@@ -410,7 +410,7 @@ export function parseSpreadsheetMatrix(
       findColIndex(
         norm,
         ['nama produk', 'nama barang', 'nama item', 'produk', 'barang', 'product', 'item', 'name', 'deskripsi'],
-        ['nama cabang', 'nama kasir', 'nama pembeli', 'nama customer', 'nama pelanggan', 'nama toko']
+        ['nama cabang', 'nama kasir', 'nama pembeli', 'nama customer', 'nama pelanggan', 'nama toko', 'nama partner', 'partner', 'nama outlet', 'nama event']
       ) >= 0;
     const hasSku =
       findColIndex(
@@ -583,6 +583,17 @@ export function parseSpreadsheetMatrix(
       'nama customer',
       'nama pelanggan',
       'nama toko',
+      'nama partner',
+      'partner',
+      'nama outlet',
+      'nama reseller',
+      'nama agen',
+      'nama salesman',
+      'nama staff',
+      'nama pegawai',
+      'nama karyawan',
+      'nama gudang',
+      'nama event',
       'kode item',
       'id item',
     ]
@@ -706,7 +717,7 @@ export function parseSpreadsheetMatrix(
       'voucher',
     ]
   );
-  const idxTotalSales = findColIndex(
+  const rawIdxTotalSales = findColIndex(
     headers,
     [
       'total penjualan',
@@ -731,6 +742,14 @@ export function parseSpreadsheetMatrix(
     [
       'total stok',
       'total qty',
+      'total terjual',
+      'terjual',
+      'qty',
+      'kuantitas',
+      'pcs',
+      'unit',
+      'keluar',
+      'masuk',
       'total item',
       'total produk',
       'diskon',
@@ -740,10 +759,18 @@ export function parseSpreadsheetMatrix(
       'kembali',
     ]
   );
+  // CRITICAL: Never let Total Sales collide with Qty Sold (e.g. "Total Terjual") which creates fake Rp 1 prices!
+  const idxTotalSales =
+    rawIdxTotalSales === idxQtySold ? -1 : rawIdxTotalSales;
   const idxBranch = findColIndex(headers, [
     'cabang',
     'nama cabang',
     'branch',
+    'nama partner',
+    'partner',
+    'nama outlet',
+    'nama toko',
+    'nama event',
     'toko',
     'outlet',
     'lokasi',
@@ -912,7 +939,11 @@ export function parseSpreadsheetMatrix(
       } else {
         transactionCode = `TRX-${saleYear}${String(saleMonth).padStart(2, '0')}-${r}`;
       }
-      uniqueTxSet.add(`${branchName.toLowerCase()}::${transactionCode.toLowerCase()}`);
+      if (qtySold > 0) {
+        uniqueTxSet.add(
+          `${branchName.toLowerCase()}::${transactionCode.toLowerCase()}`
+        );
+      }
     }
 
     rawRowCount += 1;
@@ -1021,9 +1052,17 @@ export function mergeSelectedTabs(
       const skuKey = r.sku.toLowerCase();
       const nameKey = r.name.trim().toLowerCase();
       const prev = masterBySku.get(skuKey);
+      const prevHasRealName =
+        Boolean(prev?.name) && prev!.name.toLowerCase() !== prev!.sku.toLowerCase();
+      const rowHasRealName =
+        Boolean(r.name) && r.name.toLowerCase() !== r.sku.toLowerCase();
       const entry = {
         sku: prev?.sku || r.sku,
-        name: prev?.name || r.name,
+        name: prevHasRealName
+          ? prev!.name
+          : rowHasRealName
+            ? r.name
+            : prev?.name || r.name,
         barcode: prev?.barcode || r.barcode,
         category:
           prev && prev.category !== 'Umum' ? prev.category : r.category,

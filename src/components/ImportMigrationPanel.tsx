@@ -119,6 +119,9 @@ export function ImportMigrationPanel({
 
   const [sourceLabel, setSourceLabel] = useState('');
   const [showAllPreview, setShowAllPreview] = useState(false);
+  const [previewFilter, setPreviewFilter] = useState<'tx' | 'catalog' | 'all'>(
+    'all'
+  );
   const [parsing, setParsing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [clearingImported, setClearingImported] = useState(false);
@@ -137,9 +140,16 @@ export function ImportMigrationPanel({
   const previewStats = useMemo(() => {
     const skus = new Set(previewRows.map((r) => r.sku.toLowerCase()));
     const txCodes = new Set<string>();
+    let txRowCount = 0;
+    let catalogRowCount = 0;
     let totalQtySold = 0;
     let totalOmset = 0;
     for (const r of previewRows) {
+      if (r.transactionCode?.trim()) {
+        txRowCount += 1;
+      } else {
+        catalogRowCount += 1;
+      }
       if ((r.qtySold ?? 0) > 0) {
         totalQtySold += r.qtySold ?? 0;
         totalOmset +=
@@ -155,10 +165,22 @@ export function ImportMigrationPanel({
       uniqueSkus: skus.size,
       uniqueTxCount: txCodes.size,
       hasTxCodes: txCodes.size > 0,
+      txRowCount,
+      catalogRowCount,
       totalQtySold,
       totalOmset,
     };
   }, [previewRows]);
+
+  const filteredPreviewRows = useMemo(() => {
+    if (!previewStats.hasTxCodes || previewFilter === 'all') {
+      return previewRows;
+    }
+    if (previewFilter === 'tx') {
+      return previewRows.filter((r) => Boolean(r.transactionCode?.trim()));
+    }
+    return previewRows.filter((r) => !r.transactionCode?.trim());
+  }, [previewRows, previewFilter, previewStats.hasTxCodes]);
 
   const directXlsxFromInput = useMemo(() => {
     const info = extractGoogleSheetInfo(sheetUrl);
@@ -192,6 +214,11 @@ export function ImportMigrationPanel({
     setIsDashboardOnly(parsed.isDashboardSummaryOnly);
     setSourceLabel(label);
     setShowAllPreview(false);
+    setPreviewFilter(
+      parsed.tabs.some((t) => t.selectedByDefault && t.uniqueTxCount > 0)
+        ? 'tx'
+        : 'all'
+    );
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -440,8 +467,8 @@ export function ImportMigrationPanel({
   };
 
   const visiblePreviewRows = showAllPreview
-    ? previewRows
-    : previewRows.slice(0, 100);
+    ? filteredPreviewRows
+    : filteredPreviewRows.slice(0, 100);
 
   return (
     <div className="space-y-5">
@@ -1009,12 +1036,69 @@ export function ImportMigrationPanel({
             </div>
           </div>
 
+          {previewStats.hasTxCodes && previewStats.catalogRowCount > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-2 text-xs">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreviewFilter('tx');
+                    setShowAllPreview(false);
+                  }}
+                  className={`rounded-lg px-3 py-1 font-bold transition-colors ${
+                    previewFilter === 'tx'
+                      ? 'bg-[#1B8EE6] text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  Data Transaksi / ID Trx ({previewStats.txRowCount} baris ·{' '}
+                  {previewStats.uniqueTxCount} trx)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreviewFilter('catalog');
+                    setShowAllPreview(false);
+                  }}
+                  className={`rounded-lg px-3 py-1 font-bold transition-colors ${
+                    previewFilter === 'catalog'
+                      ? 'bg-[#1B8EE6] text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  Katalog &amp; Stok ({previewStats.catalogRowCount} baris)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreviewFilter('all');
+                    setShowAllPreview(false);
+                  }}
+                  className={`rounded-lg px-3 py-1 font-bold transition-colors ${
+                    previewFilter === 'all'
+                      ? 'bg-[#1B8EE6] text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  Semua ({previewRows.length})
+                </button>
+              </div>
+              <span className="text-[11px] text-slate-500">
+                {previewFilter === 'tx'
+                  ? 'Menampilkan baris penjualan dari Data_Penjualan (beserta ID Transaksi)'
+                  : previewFilter === 'catalog'
+                    ? 'Menampilkan master produk & sisa stok dari monitoring_stok'
+                    : 'Menampilkan gabungan seluruh baris siap sinkron'}
+              </span>
+            </div>
+          )}
+
           <div className="max-h-96 overflow-auto">
             <table className="w-full text-left text-xs">
               <thead className="sticky top-0 border-b border-slate-200 bg-white text-[11px] text-slate-500">
                 <tr>
                   <th className="px-3 py-2 font-semibold">#</th>
-                  {previewStats.hasTxCodes && (
+                  {previewStats.hasTxCodes && previewFilter !== 'catalog' && (
                     <th className="px-3 py-2 font-semibold">Kode Trx</th>
                   )}
                   <th className="px-3 py-2 font-semibold">Kode Item</th>
@@ -1043,8 +1127,8 @@ export function ImportMigrationPanel({
                     <td className="font-mono-num px-3 py-2 text-slate-400">
                       {idx + 1}
                     </td>
-                    {previewStats.hasTxCodes && (
-                      <td className="font-mono-num px-3 py-2 text-slate-600 whitespace-nowrap">
+                    {previewStats.hasTxCodes && previewFilter !== 'catalog' && (
+                      <td className="font-mono-num px-3 py-2 font-semibold text-slate-700 whitespace-nowrap">
                         {row.transactionCode || '—'}
                       </td>
                     )}
@@ -1059,7 +1143,7 @@ export function ImportMigrationPanel({
                       {row.branchName}
                     </td>
                     <td className="font-mono-num px-3 py-2 text-slate-600 whitespace-nowrap">
-                      {row.saleMonth
+                      {row.qtySold && row.saleMonth
                         ? `${MONTH_SHORT_MAP[row.saleMonth] ?? row.saleMonth} ${row.saleYear ?? defaultYear}`
                         : '—'}
                     </td>
@@ -1095,15 +1179,15 @@ export function ImportMigrationPanel({
             </table>
           </div>
 
-          {previewRows.length > 100 && !showAllPreview && (
+          {filteredPreviewRows.length > 100 && !showAllPreview && (
             <div className="border-t border-slate-200 bg-slate-50 px-4 py-2.5 text-center">
               <button
                 type="button"
                 onClick={() => setShowAllPreview(true)}
                 className="text-xs font-bold text-[#1B8EE6] hover:underline"
               >
-                Tampilkan semua {previewRows.length} baris (sedang menampilkan
-                100 baris pertama)
+                Tampilkan semua {filteredPreviewRows.length} baris (sedang
+                menampilkan 100 baris pertama)
               </button>
             </div>
           )}
