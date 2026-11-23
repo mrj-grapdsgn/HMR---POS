@@ -99,6 +99,34 @@ export function calculateSimpleTotals(
     };
   }
 
+  if (discount.mode === 'b1g1') {
+    const unitPrices: number[] = [];
+    items.forEach((item) => {
+      const p = Math.max(0, Math.round(item.unitPrice));
+      for (let i = 0; i < item.qty; i++) {
+        unitPrices.push(p);
+      }
+    });
+    unitPrices.sort((a, b) => b - a);
+
+    let discountAmount = 0;
+    for (let i = 0; i < unitPrices.length; i += 2) {
+      if (i + 1 < unitPrices.length) {
+        discountAmount += unitPrices[i + 1];
+      }
+    }
+
+    return {
+      subtotal,
+      discountAmount,
+      adjustmentLabel: discountAmount > 0 ? 'Promo Buy 1 Get 1 Free' : null,
+      grandTotal: Math.max(0, subtotal - discountAmount),
+      totalQty,
+      voucherError: null,
+      appliedVoucher: null,
+    };
+  }
+
   // mode === 'voucher'
   const cleanCode = discount.voucherCode.trim().toUpperCase();
   if (!cleanCode) {

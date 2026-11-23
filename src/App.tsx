@@ -383,7 +383,7 @@ export default function App() {
   );
 
   const filteredProducts = useMemo(() => {
-    return products.filter((p) => {
+    const list = products.filter((p) => {
       const catOk = category === 'Semua' || p.category === category;
       if (!catOk) return false;
       if (!searchQuery.trim()) return true;
@@ -395,7 +395,18 @@ export default function App() {
         p.category.toLowerCase().includes(q)
       );
     });
-  }, [products, category, searchQuery]);
+
+    return list.sort((a, b) => {
+      const stockA = stockByProductId[a.id] ?? 0;
+      const stockB = stockByProductId[b.id] ?? 0;
+      const hasStockA = stockA > 0 ? 1 : 0;
+      const hasStockB = stockB > 0 ? 1 : 0;
+      if (hasStockA !== hasStockB) {
+        return hasStockB - hasStockA; // stock > 0 first
+      }
+      return a.name.localeCompare(b.name);
+    });
+  }, [products, category, searchQuery, stockByProductId]);
 
   const qtyByProduct = useMemo(() => {
     const map: Record<string, number> = {};
@@ -553,7 +564,7 @@ export default function App() {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-slate-50">
         <div className="flex items-center gap-2.5 text-sm font-semibold text-slate-600">
-          <Loader2 className="h-5 w-5 animate-spin text-[#1B8EE6]" />
+          <Loader2 className="h-5 w-5 animate-spin text-[#0F172A]" />
           <span>Memuat KasirPOS...</span>
         </div>
       </div>
@@ -569,7 +580,7 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-100 select-none">
       {/* Top Bar */}
-      <header className="flex h-14 shrink-0 items-center justify-between gap-3 bg-[#1B8EE6] px-4 text-white shadow-sm">
+      <header className="flex h-14 shrink-0 items-center justify-between gap-3 bg-[#0F172A] px-4 text-white shadow-sm">
         <div className="flex min-w-0 items-center gap-3">
           <div className="truncate text-base font-extrabold tracking-tight whitespace-nowrap">
             {profile?.storeName || 'Hikemore Store'}
@@ -581,7 +592,7 @@ export default function App() {
               onClick={() => setViewMode('pos')}
               className={`flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-bold whitespace-nowrap transition-colors ${
                 viewMode === 'pos'
-                  ? 'bg-white text-[#1B8EE6] shadow-sm'
+                  ? 'bg-white text-[#0F172A] shadow-sm'
                   : 'text-white/90 hover:text-white'
               }`}
             >
@@ -593,7 +604,7 @@ export default function App() {
               onClick={() => setViewMode('admin')}
               className={`flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-bold whitespace-nowrap transition-colors ${
                 viewMode === 'admin'
-                  ? 'bg-white text-[#1B8EE6] shadow-sm'
+                  ? 'bg-white text-[#0F172A] shadow-sm'
                   : 'text-white/90 hover:text-white'
               }`}
             >
@@ -768,14 +779,14 @@ export default function App() {
           <section className="flex h-full w-full flex-col border-r border-slate-200 bg-white md:w-[46%] lg:w-[44%]">
             {/* Mobile Branch Switcher */}
             {activeBranchList.length > 0 && (
-              <div className="flex items-center justify-between border-b border-slate-200 bg-sky-50 px-3.5 py-2 text-xs md:hidden">
+              <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-3.5 py-2 text-xs md:hidden">
                 <span className="font-semibold text-slate-600">
                   Cabang Aktif:
                 </span>
                 <select
                   value={activeBranch?.id ?? ''}
                   onChange={(e) => handleBranchSwitch(e.target.value)}
-                  className="rounded border border-sky-200 bg-white px-2 py-1 font-bold text-[#1B8EE6]"
+                  className="rounded border border-slate-200 bg-white px-2 py-1 font-bold text-[#0F172A]"
                 >
                   {activeBranchList.map((b) => (
                     <option key={b.id} value={b.id}>
@@ -821,7 +832,7 @@ export default function App() {
                         Math.max(1, parseInt(e.target.value || '1', 10) || 1)
                       )
                     }
-                    className="font-mono-num h-11 w-full rounded-lg border border-slate-300 bg-white px-2 text-center text-sm font-bold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                    className="font-mono-num h-11 w-full rounded-lg border border-slate-300 bg-white px-2 text-center text-sm font-bold text-slate-900 focus:border-[#0F172A] focus:outline-none"
                   />
                 </div>
               </div>
@@ -898,7 +909,7 @@ export default function App() {
                             )
                           }
                           aria-label={`Qty ${item.name}`}
-                          className="font-mono-num h-7 w-11 rounded-md border border-slate-300 bg-white text-center text-xs font-bold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                          className="font-mono-num h-7 w-11 rounded-md border border-slate-300 bg-white text-center text-xs font-bold text-slate-900 focus:border-[#0F172A] focus:outline-none"
                         />
                         <button
                           type="button"
@@ -907,7 +918,7 @@ export default function App() {
                             updateItemQty(item.productId, item.qty + 1)
                           }
                           aria-label={`Tambah ${item.name}`}
-                          className="flex h-7 w-7 items-center justify-center rounded-md bg-[#1B8EE6] text-white hover:bg-[#1479C9] active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-300"
+                          className="flex h-7 w-7 items-center justify-center rounded-md bg-[#0F172A] text-white hover:bg-[#1E293B] active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-300"
                         >
                           <Plus className="h-3.5 w-3.5" />
                         </button>
@@ -991,7 +1002,7 @@ export default function App() {
           </section>
 
           {/* RIGHT PANEL: Katalog Produk & Stok Cabang Aktif */}
-          <section className="flex h-full flex-1 flex-col overflow-hidden bg-[#1B8EE6]">
+          <section className="flex h-full flex-1 flex-col overflow-hidden bg-[#0F172A]">
             {/* Dynamic Category Filter */}
             <div className="flex shrink-0 items-center justify-between gap-2 p-3">
               <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
@@ -1004,7 +1015,7 @@ export default function App() {
                       onClick={() => setCategory(cat)}
                       className={`rounded-lg px-3.5 py-1.5 text-xs font-bold whitespace-nowrap transition-colors ${
                         active
-                          ? 'bg-white text-[#1B8EE6] shadow-sm'
+                          ? 'bg-white text-[#0F172A] shadow-sm'
                           : 'bg-white/15 text-white hover:bg-white/25'
                       }`}
                     >
@@ -1038,7 +1049,7 @@ export default function App() {
                         setSearchQuery('');
                         setCategory('Semua');
                       }}
-                      className="rounded-lg bg-white px-3.5 py-1.5 text-xs font-bold text-[#1B8EE6]"
+                      className="rounded-lg bg-white px-3.5 py-1.5 text-xs font-bold text-[#0F172A]"
                     >
                       Tampilkan Semua
                     </button>
@@ -1073,7 +1084,7 @@ export default function App() {
       {loadingReceipt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40">
           <div className="flex items-center gap-2 rounded-lg bg-white px-4 py-3 text-xs font-bold text-slate-700 shadow-lg">
-            <Loader2 className="h-4 w-4 animate-spin text-[#1B8EE6]" />
+            <Loader2 className="h-4 w-4 animate-spin text-[#0F172A]" />
             <span>Memuat detail struk...</span>
           </div>
         </div>
@@ -1108,6 +1119,23 @@ export default function App() {
   );
 }
 
+function getCleanProductName(product: Product): string {
+  const name = product.name?.trim() || '';
+  const sku = product.sku?.trim() || '';
+  const cat = product.category?.trim() || '';
+
+  const isNumeric = /^\d+$/.test(name);
+  const isGeneric = ['harga_pas', 'harga pas', 'umum', 'katalog', 'product', 'item', sku.toLowerCase()].includes(name.toLowerCase());
+
+  if (!name || isNumeric || isGeneric) {
+    if (cat && !['harga_pas', 'umum', 'katalog'].includes(cat.toLowerCase())) {
+      return `${cat} (${sku || product.id})`;
+    }
+    return `Produk Hikemore ${sku || product.id}`;
+  }
+  return name;
+}
+
 function SimpleProductCard({
   product,
   availableStock,
@@ -1121,6 +1149,7 @@ function SimpleProductCard({
 }) {
   const [imgError, setImgError] = useState(false);
   const outOfStock = availableStock <= 0;
+  const displayName = getCleanProductName(product);
 
   return (
     <button
@@ -1152,7 +1181,7 @@ function SimpleProductCard({
         )}
 
         {inCartQty > 0 && (
-          <span className="absolute top-2 right-2 flex h-6 min-w-6 items-center justify-center rounded-full bg-[#1B8EE6] px-1.5 text-[11px] font-bold text-white shadow tabular-nums">
+          <span className="absolute top-2 right-2 flex h-6 min-w-6 items-center justify-center rounded-full bg-[#0F172A] px-1.5 text-[11px] font-bold text-white shadow tabular-nums">
             {inCartQty}
           </span>
         )}
@@ -1160,7 +1189,7 @@ function SimpleProductCard({
 
       <div className="flex flex-1 flex-col justify-between px-2.5 pt-2 pb-2.5">
         <div className="line-clamp-2 min-h-[32px] text-xs leading-snug font-semibold text-slate-800">
-          {product.name}
+          {displayName}
         </div>
         <div className="mt-1.5 flex items-center justify-between gap-1">
           <span

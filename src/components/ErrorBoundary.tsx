@@ -60,7 +60,7 @@ export class ErrorBoundary extends React.Component<
               href={upgradeUrl}
               target="_blank"
               rel="noreferrer"
-              className="mt-3 inline-block text-xs font-semibold text-[#1B8EE6] underline"
+              className="mt-3 inline-block text-xs font-semibold text-[#0F172A] underline"
             >
               Buka Pengaturan Kuota Firebase Console
             </a>
@@ -73,7 +73,7 @@ export class ErrorBoundary extends React.Component<
           <button
             type="button"
             onClick={() => window.location.reload()}
-            className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-[#1B8EE6] text-xs font-bold text-white hover:bg-[#1479C9]"
+            className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-[#0F172A] text-xs font-bold text-white hover:bg-[#1E293B]"
           >
             <RefreshCw className="h-4 w-4" />
             <span>Muat Ulang Aplikasi</span>

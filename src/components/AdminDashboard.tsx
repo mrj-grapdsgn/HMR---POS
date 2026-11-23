@@ -21,7 +21,7 @@ import {
   UserCheck,
   Users,
 } from 'lucide-react';
-import { SUGGESTED_CATEGORIES } from '../data/catalog';
+import { MONTH_OPTIONS, SUGGESTED_CATEGORIES } from '../data/catalog';
 import {
   Branch,
   BranchStock,
@@ -39,11 +39,90 @@ import {
 } from '../types/pos';
 import { playScanBeep } from '../utils/barcodeScanner';
 import { formatDateTime, formatNumber, formatRupiah } from '../utils/format';
-import { inferCategoryFromProductName } from '../utils/productCategory';
+import {
+  inferCategoryFromProductName,
+  normalizeBranchKey,
+} from '../utils/productCategory';
+import { parseTimestampMsFromTxCode } from '../utils/spreadsheetImport';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { ImportMigrationPanel } from './ImportMigrationPanel';
 import { InventoryBranchPanel } from './InventoryBranchPanel';
 import { RestockAnalyticsPanel } from './RestockAnalyticsPanel';
+import { ReportExportModal } from './ReportExportModal';
+import { QuickProductEditModal } from './QuickProductEditModal';
+
+function getEffectiveTxTime(tx: SimpleTransaction): {
+  ms: number;
+  dateLabel: string;
+  shortLabel: string;
+  saleMonth: number;
+  saleYear: number;
+} {
+  if (tx.source === 'import') {
+    const epochMs = parseTimestampMsFromTxCode(tx.invoiceNo);
+    if (epochMs !== null) {
+      const wib = new Date(epochMs + 7 * 60 * 60 * 1000);
+      const dd = String(wib.getUTCDate()).padStart(2, '0');
+      const mm = String(wib.getUTCMonth() + 1).padStart(2, '0');
+      const yyyy = wib.getUTCFullYear();
+      const hh = String(wib.getUTCHours()).padStart(2, '0');
+      const min = String(wib.getUTCMinutes()).padStart(2, '0');
+      return {
+        ms: epochMs,
+        dateLabel: `${dd}/${mm}/${yyyy} ${hh}:${min}`,
+        shortLabel: `${dd}/${mm} ${hh}:${min}`,
+        saleMonth: tx.saleMonth || wib.getUTCMonth() + 1,
+        saleYear: tx.saleYear || yyyy,
+      };
+    }
+    const yr = tx.saleYear || new Date().getFullYear();
+    const mo = tx.saleMonth || 1;
+    const moLabel =
+      MONTH_OPTIONS.find((m) => m.num === mo)?.short ?? String(mo);
+    return {
+      ms: Date.UTC(yr, mo - 1, 15, 12, 0, 0),
+      dateLabel: `${moLabel} ${yr}`,
+      shortLabel: `${moLabel} ${yr}`,
+      saleMonth: mo,
+      saleYear: yr,
+    };
+  }
+  const dt = new Date(tx.createdAt);
+  const valid = !Number.isNaN(dt.getTime());
+  const ms = valid ? dt.getTime() : 0;
+  const dd = valid ? String(dt.getDate()).padStart(2, '0') : '--';
+  const mm = valid ? String(dt.getMonth() + 1).padStart(2, '0') : '--';
+  const hh = valid ? String(dt.getHours()).padStart(2, '0') : '--';
+  const min = valid ? String(dt.getMinutes()).padStart(2, '0') : '--';
+  return {
+    ms,
+    dateLabel: formatDateTime(tx.createdAt),
+    shortLabel: valid
+      ? `${dd}/${mm} ${hh}:${min}`
+      : formatDateTime(tx.createdAt),
+    saleMonth:
+      tx.saleMonth || (valid ? dt.getMonth() + 1 : new Date().getMonth() + 1),
+    saleYear:
+      tx.saleYear || (valid ? dt.getFullYear() : new Date().getFullYear()),
+  };
+}
+
+function resolveTxFinancials(tx: SimpleTransaction): {
+  gross: number;
+  disc: number;
+  net: number;
+} {
+  const rawSub = Math.max(0, Math.round(tx.subtotal || 0));
+  const rawDisc = Math.max(0, Math.round(tx.discountAmount || 0));
+  const rawGrand = Math.max(0, Math.round(tx.grandTotal || 0));
+  const net =
+    rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
+      ? Math.max(0, rawSub - rawDisc)
+      : rawGrand;
+  const gross = Math.max(rawSub, net + rawDisc);
+  const disc = Math.max(0, gross - net);
+  return { gross, disc, net };
+}
 
 type AdminTab =
   | 'analytics'
@@ -346,6 +425,8 @@ export function AdminDashboard({
   const [staffRole, setStaffRole] = useState<StaffRole>('kasir');
   const [staffActive, setStaffActive] = useState(true);
   const [staffSaving, setStaffSaving] = useState(false);
+  const [reportExportOpen, setReportExportOpen] = useState(false);
+  const [quickEditProduct, setQuickEditProduct] = useState<Product | null>(null);
 
   const resetStaffForm = () => {
     setStaffEditId(undefined);
@@ -393,52 +474,229 @@ export function AdminDashboard({
   /* ---------- Transactions Filter & CSV Export ---------- */
   const [txSearch, setTxSearch] = useState('');
   const [txBranchFilter, setTxBranchFilter] = useState<string>('all');
+  const [txMonthFilter, setTxMonthFilter] = useState<'all' | number>('all');
+  const [txSourceFilter, setTxSourceFilter] = useState<'all' | 'import' | 'pos'>(
+    'all'
+  );
   const [txMethodFilter, setTxMethodFilter] = useState<'all' | PaymentMethod>(
     'all'
   );
+  const [txViewMode, setTxViewMode] = useState<'itemized' | 'summary'>(
+    'itemized'
+  );
+  const [showAllTxRows, setShowAllTxRows] = useState(false);
+
+  const unifiedTxBranches = useMemo(() => {
+    const map = new Map<
+      string,
+      { key: string; name: string; branchIds: Set<string> }
+    >();
+    for (const b of branches) {
+      const key = normalizeBranchKey(b.name);
+      const prev = map.get(key);
+      if (prev) {
+        prev.branchIds.add(b.id);
+        if (prev.name.includes('_') && !b.name.includes('_')) {
+          prev.name = b.name;
+        }
+      } else {
+        map.set(key, { key, name: b.name, branchIds: new Set([b.id]) });
+      }
+    }
+    return Array.from(map.values());
+  }, [branches]);
+
+  const branchNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    branches.forEach((b) => map.set(b.id, b.name));
+    return map;
+  }, [branches]);
+
+  const productById = useMemo(() => {
+    const map = new Map<string, Product>();
+    products.forEach((p) => map.set(p.id, p));
+    return map;
+  }, [products]);
+
+  const linesByTxId = useMemo(() => {
+    const map = new Map<string, SalesLine[]>();
+    for (const line of salesLines) {
+      const list = map.get(line.transactionId) ?? [];
+      list.push(line);
+      map.set(line.transactionId, list);
+    }
+    return map;
+  }, [salesLines]);
+
+  const txTimeMap = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof getEffectiveTxTime>>();
+    for (const t of transactions) {
+      map.set(t.id, getEffectiveTxTime(t));
+    }
+    return map;
+  }, [transactions]);
 
   const filteredTx = useMemo(() => {
-    return transactions.filter((t) => {
-      if (txBranchFilter !== 'all' && t.branchId !== txBranchFilter) {
-        return false;
+    const activeUnified =
+      txBranchFilter === 'all'
+        ? null
+        : unifiedTxBranches.find((u) => u.key === txBranchFilter) ?? null;
+
+    const list = transactions.filter((t) => {
+      if (txBranchFilter !== 'all') {
+        const matchById = t.branchId
+          ? activeUnified?.branchIds.has(t.branchId)
+          : false;
+        const txBranchKey = normalizeBranchKey(
+          t.branchName || (t.branchId ? branchNameById.get(t.branchId) : '') || ''
+        );
+        if (!matchById && txBranchKey !== txBranchFilter) {
+          return false;
+        }
+      }
+      if (txMonthFilter !== 'all') {
+        const info = txTimeMap.get(t.id);
+        if ((info?.saleMonth ?? t.saleMonth) !== txMonthFilter) {
+          return false;
+        }
+      }
+      if (txSourceFilter !== 'all') {
+        const src = t.source ?? 'pos';
+        if (src !== txSourceFilter) return false;
       }
       if (txMethodFilter !== 'all' && t.paymentMethod !== txMethodFilter) {
         return false;
       }
       if (txSearch.trim()) {
         const q = txSearch.toLowerCase().trim();
-        return (
+        const txMatches =
           t.invoiceNo.toLowerCase().includes(q) ||
           (t.cashierName ?? '').toLowerCase().includes(q) ||
-          (t.branchName ?? '').toLowerCase().includes(q)
+          (t.branchName ?? '').toLowerCase().includes(q);
+        if (txMatches) return true;
+        const txLines = linesByTxId.get(t.id) ?? [];
+        return txLines.some(
+          (l) =>
+            l.productName.toLowerCase().includes(q) ||
+            l.productSku.toLowerCase().includes(q)
         );
       }
       return true;
     });
-  }, [transactions, txBranchFilter, txMethodFilter, txSearch]);
+
+    return list.sort((a, b) => {
+      const msA = txTimeMap.get(a.id)?.ms ?? 0;
+      const msB = txTimeMap.get(b.id)?.ms ?? 0;
+      return msB - msA;
+    });
+  }, [
+    transactions,
+    txBranchFilter,
+    unifiedTxBranches,
+    branchNameById,
+    txMonthFilter,
+    txSourceFilter,
+    txMethodFilter,
+    txSearch,
+    txTimeMap,
+    linesByTxId,
+  ]);
 
   const txSummary = useMemo(() => {
     let grossSum = 0;
     let discountSum = 0;
     let netSum = 0;
+    let qtySum = 0;
     for (const t of filteredTx) {
-      const rawSub = Math.max(0, Math.round(t.subtotal || 0));
-      const rawDisc = Math.max(0, Math.round(t.discountAmount || 0));
-      const rawGrand = Math.max(0, Math.round(t.grandTotal || 0));
-      const net =
-        rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
-          ? Math.max(0, rawSub - rawDisc)
-          : rawGrand;
-      const gross = Math.max(rawSub, net + rawDisc);
-      const disc = Math.max(0, gross - net);
+      const { gross, disc, net } = resolveTxFinancials(t);
       grossSum += gross;
       discountSum += disc;
       netSum += net;
+      const txLines = linesByTxId.get(t.id);
+      if (txLines && txLines.length > 0) {
+        qtySum += txLines.reduce((s, l) => s + l.qty, 0);
+      } else {
+        qtySum += t.totalQty ?? 0;
+      }
     }
-    return { grossSum, discountSum, netSum };
-  }, [filteredTx]);
+    return { grossSum, discountSum, netSum, qtySum };
+  }, [filteredTx, linesByTxId]);
+
+  const visibleTxList = showAllTxRows ? filteredTx : filteredTx.slice(0, 100);
 
   const handleExportCsv = () => {
+    if (txViewMode === 'itemized') {
+      const header = [
+        'Waktu',
+        'ID Transaksi',
+        'Cabang',
+        'SKU',
+        'Item',
+        'Harga Satuan',
+        'Qty',
+        'Subtotal Item',
+        'Potongan TRX',
+        'Total Bayar (Net)',
+        'Metode',
+      ];
+      const rows: Array<Array<string | number>> = [];
+      for (const t of filteredTx) {
+        const { gross, disc, net } = resolveTxFinancials(t);
+        const timeInfo = txTimeMap.get(t.id) ?? getEffectiveTxTime(t);
+        const txLines = linesByTxId.get(t.id) ?? [];
+        if (txLines.length === 0) {
+          rows.push([
+            `"${timeInfo.dateLabel}"`,
+            t.invoiceNo,
+            `"${(t.branchName ?? 'Pusat').replace(/"/g, '""')}"`,
+            '-',
+            `"${t.invoiceNo}"`,
+            gross,
+            t.totalQty ?? 0,
+            gross,
+            disc,
+            net,
+            t.paymentMethod.toUpperCase(),
+          ]);
+        } else {
+          txLines.forEach((line, idx) => {
+            const liveProd = productById.get(line.productId);
+            const itemName = liveProd?.name ?? line.productName;
+            const isFree =
+              line.unitPrice === 0 || (line.lineTotal === 0 && net > 0);
+            const unitPrice = isFree ? 0 : line.unitPrice;
+            const itemGross = isFree
+              ? 0
+              : unitPrice > 0
+                ? unitPrice * line.qty
+                : line.lineTotal;
+            rows.push([
+              `"${timeInfo.dateLabel}"`,
+              t.invoiceNo,
+              `"${(t.branchName ?? 'Pusat').replace(/"/g, '""')}"`,
+              line.productSku,
+              `"${itemName.replace(/"/g, '""')}"`,
+              unitPrice,
+              line.qty,
+              itemGross,
+              idx === 0 ? disc : 0,
+              idx === 0 ? net : '-',
+              t.paymentMethod.toUpperCase(),
+            ]);
+          });
+        }
+      }
+      const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `riwayat-transaksi-detail-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+
     const header = [
       'Invoice',
       'Cabang',
@@ -448,23 +706,16 @@ export function AdminDashboard({
       'Qty',
       'Subtotal',
       'Diskon',
-      'Total Bersih',
+      'Total Bayar (Net)',
       'Metode',
     ];
     const rows = filteredTx.map((t) => {
-      const rawSub = Math.max(0, Math.round(t.subtotal || 0));
-      const rawDisc = Math.max(0, Math.round(t.discountAmount || 0));
-      const rawGrand = Math.max(0, Math.round(t.grandTotal || 0));
-      const net =
-        rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
-          ? Math.max(0, rawSub - rawDisc)
-          : rawGrand;
-      const gross = Math.max(rawSub, net + rawDisc);
-      const disc = Math.max(0, gross - net);
+      const { gross, disc, net } = resolveTxFinancials(t);
+      const timeInfo = txTimeMap.get(t.id) ?? getEffectiveTxTime(t);
       return [
         t.invoiceNo,
         `"${(t.branchName ?? 'Pusat').replace(/"/g, '""')}"`,
-        formatDateTime(t.createdAt),
+        `"${timeInfo.dateLabel}"`,
         `"${(t.cashierName ?? 'Admin').replace(/"/g, '""')}"`,
         t.source ?? 'pos',
         t.totalQty ?? 0,
@@ -570,7 +821,7 @@ export function AdminDashboard({
                 onClick={() => setActiveTab(item.id)}
                 className={`flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-xs font-semibold transition-colors ${
                   active
-                    ? 'bg-sky-50 text-[#1B8EE6]'
+                    ? 'bg-slate-50 text-[#0F172A]'
                     : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
                 }`}
               >
@@ -588,11 +839,19 @@ export function AdminDashboard({
           })}
         </nav>
 
-        <div className="border-t border-slate-200 p-3">
+        <div className="border-t border-slate-200 p-3 space-y-2">
+          <button
+            type="button"
+            onClick={() => setReportExportOpen(true)}
+            className="flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-[#0F172A] bg-slate-50 text-xs font-bold text-[#0F172A] transition-colors hover:bg-slate-100"
+          >
+            <Download className="h-4 w-4" />
+            <span>Ekspor Laporan PDF/Excel</span>
+          </button>
           <button
             type="button"
             onClick={onBackToPos}
-            className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-[#1B8EE6] text-xs font-bold text-white transition-colors hover:bg-[#1479C9]"
+            className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-[#0F172A] text-xs font-bold text-white transition-colors hover:bg-[#1E293B]"
           >
             <ArrowLeft className="h-4 w-4" />
             <span>Kembali ke Kasir POS</span>
@@ -611,7 +870,7 @@ export function AdminDashboard({
               onClick={() => setActiveTab(item.id)}
               className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap ${
                 activeTab === item.id
-                  ? 'bg-[#1B8EE6] text-white'
+                  ? 'bg-[#0F172A] text-white'
                   : 'bg-slate-100 text-slate-600'
               }`}
             >
@@ -726,7 +985,7 @@ export function AdminDashboard({
                       <button
                         type="button"
                         onClick={resetProdForm}
-                        className="text-xs font-semibold text-[#1B8EE6] hover:underline"
+                        className="text-xs font-semibold text-[#0F172A] hover:underline"
                       >
                         Batal
                       </button>
@@ -753,7 +1012,7 @@ export function AdminDashboard({
                         }
                       }}
                       placeholder="Contoh: Celana Panjang Alfea"
-                      className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                      className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                     />
                   </div>
 
@@ -769,28 +1028,25 @@ export function AdminDashboard({
                         value={prodPrice}
                         onChange={(e) => setProdPrice(e.target.value)}
                         placeholder="217000"
-                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
                     <div>
                       <label className="mb-1 block text-xs font-semibold text-slate-600">
-                        Kategori (Bebas)
+                        Kategori
                       </label>
-                      <input
-                        type="text"
-                        required
-                        maxLength={50}
-                        list="category-suggestions"
+                      <select
                         value={prodCategory}
                         onChange={(e) => setProdCategory(e.target.value)}
-                        placeholder="Daypack / Jacket"
-                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
-                      />
-                      <datalist id="category-suggestions">
+                        className="h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-900 focus:border-[#0F172A] focus:outline-none"
+                      >
+                        <option value="">Pilih Kategori...</option>
                         {categorySuggestions.map((c) => (
-                          <option key={c} value={c} />
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
                         ))}
-                      </datalist>
+                      </select>
                     </div>
                   </div>
 
@@ -805,7 +1061,7 @@ export function AdminDashboard({
                         value={prodSku}
                         onChange={(e) => setProdSku(e.target.value)}
                         placeholder="101021002000"
-                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
                     <div>
@@ -819,13 +1075,13 @@ export function AdminDashboard({
                           value={prodBarcode}
                           onChange={(e) => setProdBarcode(e.target.value)}
                           placeholder="Scan alat / kamera"
-                          className="font-mono-num h-9 min-w-0 flex-1 rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                          className="font-mono-num h-9 min-w-0 flex-1 rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                         />
                         <button
                           type="button"
                           onClick={() => setProdBarcodeScanOpen(true)}
                           title="Scan barcode dengan kamera HP"
-                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-slate-50 text-slate-700 hover:border-[#1B8EE6] hover:bg-sky-50 hover:text-[#1B8EE6]"
+                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-slate-50 text-slate-700 hover:border-[#0F172A] hover:bg-slate-50 hover:text-[#0F172A]"
                         >
                           <Camera className="h-4 w-4" />
                         </button>
@@ -877,7 +1133,7 @@ export function AdminDashboard({
                       value={prodImage}
                       onChange={(e) => setProdImage(e.target.value)}
                       placeholder="Kosongkan jika tanpa foto"
-                      className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                      className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                     />
                   </div>
 
@@ -908,7 +1164,7 @@ export function AdminDashboard({
                         type="button"
                         disabled={autoCatRunning || products.length === 0}
                         onClick={() => void handleAutoCategorizeAll()}
-                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 text-[11px] font-bold text-[#1B8EE6] hover:bg-sky-100 disabled:opacity-50 whitespace-nowrap"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-[11px] font-bold text-[#0F172A] hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap"
                       >
                         <Sparkles className="h-3.5 w-3.5" />
                         <span>
@@ -924,7 +1180,7 @@ export function AdminDashboard({
                           value={prodSearch}
                           onChange={(e) => setProdSearch(e.target.value)}
                           placeholder="Cari nama, Kode Item, kategori..."
-                          className="h-8 w-full rounded-lg border border-slate-300 pr-3 pl-8 text-xs focus:border-[#1B8EE6] focus:outline-none"
+                          className="h-8 w-full rounded-lg border border-slate-300 pr-3 pl-8 text-xs focus:border-[#0F172A] focus:outline-none"
                         />
                       </div>
                     </div>
@@ -1032,7 +1288,7 @@ export function AdminDashboard({
                       <button
                         type="button"
                         onClick={resetVchForm}
-                        className="text-xs font-semibold text-[#1B8EE6] hover:underline"
+                        className="text-xs font-semibold text-[#0F172A] hover:underline"
                       >
                         Batal
                       </button>
@@ -1050,7 +1306,7 @@ export function AdminDashboard({
                       value={vchCode}
                       onChange={(e) => setVchCode(e.target.value.toUpperCase())}
                       placeholder="Contoh: CFD15"
-                      className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs uppercase text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                      className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs uppercase text-slate-900 focus:border-[#0F172A] focus:outline-none"
                     />
                   </div>
 
@@ -1064,7 +1320,7 @@ export function AdminDashboard({
                         onChange={(e) =>
                           setVchType(e.target.value as 'percent' | 'fixed')
                         }
-                        className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       >
                         <option value="percent">Persen (%)</option>
                         <option value="fixed">Nominal (Rp)</option>
@@ -1082,7 +1338,7 @@ export function AdminDashboard({
                         value={vchValue}
                         onChange={(e) => setVchValue(e.target.value)}
                         placeholder={vchType === 'percent' ? '15' : '25000'}
-                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
                   </div>
@@ -1098,7 +1354,7 @@ export function AdminDashboard({
                         value={vchLabel}
                         onChange={(e) => setVchLabel(e.target.value)}
                         placeholder="15% / Rp 25rb"
-                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
                     <div>
@@ -1111,7 +1367,7 @@ export function AdminDashboard({
                         value={vchMinSub}
                         onChange={(e) => setVchMinSub(e.target.value)}
                         placeholder="0"
-                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
                   </div>
@@ -1121,7 +1377,7 @@ export function AdminDashboard({
                       type="checkbox"
                       checked={vchActive}
                       onChange={(e) => setVchActive(e.target.checked)}
-                      className="h-4 w-4 accent-[#1B8EE6]"
+                      className="h-4 w-4 accent-[#0F172A]"
                     />
                     <span>Aktifkan voucher di POS</span>
                   </label>
@@ -1238,7 +1494,7 @@ export function AdminDashboard({
                   className="rounded-xl border border-slate-200 bg-white p-4"
                 >
                   <div className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-900">
-                    <Store className="h-4 w-4 text-[#1B8EE6]" />
+                    <Store className="h-4 w-4 text-[#0F172A]" />
                     <span>Identitas Toko & Pemilik Akun</span>
                   </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -1252,7 +1508,7 @@ export function AdminDashboard({
                         maxLength={100}
                         value={storeNameInput}
                         onChange={(e) => setStoreNameInput(e.target.value)}
-                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
                     <div>
@@ -1265,14 +1521,14 @@ export function AdminDashboard({
                         maxLength={80}
                         value={ownerNameInput}
                         onChange={(e) => setOwnerNameInput(e.target.value)}
-                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
                     <div className="flex items-end">
                       <button
                         type="submit"
                         disabled={profileSaving}
-                        className="h-9 w-full rounded-lg bg-[#1B8EE6] text-xs font-bold text-white hover:bg-[#1479C9] disabled:bg-slate-300"
+                        className="h-9 w-full rounded-lg bg-[#0F172A] text-xs font-bold text-white hover:bg-[#1E293B] disabled:bg-slate-300"
                       >
                         {profileSaving ? 'Menyimpan...' : 'Simpan Profil Toko'}
                       </button>
@@ -1295,7 +1551,7 @@ export function AdminDashboard({
                         <button
                           type="button"
                           onClick={resetStaffForm}
-                          className="text-xs font-semibold text-[#1B8EE6] hover:underline"
+                          className="text-xs font-semibold text-[#0F172A] hover:underline"
                         >
                           Batal
                         </button>
@@ -1313,7 +1569,7 @@ export function AdminDashboard({
                         value={staffName}
                         onChange={(e) => setStaffName(e.target.value)}
                         placeholder="Contoh: Rina Wijaya"
-                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
 
@@ -1327,7 +1583,7 @@ export function AdminDashboard({
                         value={staffUsername}
                         onChange={(e) => setStaffUsername(e.target.value)}
                         placeholder="rina.kasir"
-                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
 
@@ -1340,7 +1596,7 @@ export function AdminDashboard({
                         onChange={(e) =>
                           setStaffRole(e.target.value as StaffRole)
                         }
-                        className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                        className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-900 focus:border-[#0F172A] focus:outline-none"
                       >
                         <option value="kasir">Kasir (Operasional POS)</option>
                         <option value="admin">Admin (Akses Penuh)</option>
@@ -1352,7 +1608,7 @@ export function AdminDashboard({
                         type="checkbox"
                         checked={staffActive}
                         onChange={(e) => setStaffActive(e.target.checked)}
-                        className="h-4 w-4 accent-[#1B8EE6]"
+                        className="h-4 w-4 accent-[#0F172A]"
                       />
                       <span>Status Akun Aktif</span>
                     </label>
@@ -1402,7 +1658,7 @@ export function AdminDashboard({
                                 <td className="px-4 py-2.5 font-semibold text-slate-900">
                                   {stf.displayName}
                                   {isCurrent && (
-                                    <span className="ml-2 text-[11px] font-bold text-[#1B8EE6]">
+                                    <span className="ml-2 text-[11px] font-bold text-[#0F172A]">
                                       · Aktif di POS
                                     </span>
                                   )}
@@ -1413,7 +1669,7 @@ export function AdminDashboard({
                                 <td className="px-3 py-2.5">
                                   <span className="inline-flex items-center gap-1 font-semibold text-slate-700">
                                     {stf.role === 'admin' ? (
-                                      <ShieldCheck className="h-3.5 w-3.5 text-[#1B8EE6]" />
+                                      <ShieldCheck className="h-3.5 w-3.5 text-[#0F172A]" />
                                     ) : (
                                       <UserCheck className="h-3.5 w-3.5 text-emerald-600" />
                                     )}
@@ -1442,7 +1698,7 @@ export function AdminDashboard({
                                             `Kasir aktif diubah ke ${stf.displayName}`
                                           );
                                         }}
-                                        className="rounded border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-bold text-[#1B8EE6] hover:bg-sky-100"
+                                        className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-bold text-[#0F172A] hover:bg-slate-100"
                                       >
                                         Pakai
                                       </button>
@@ -1497,31 +1753,71 @@ export function AdminDashboard({
                       <input
                         type="text"
                         value={txSearch}
-                        onChange={(e) => setTxSearch(e.target.value)}
-                        placeholder="Cari invoice, cabang, kasir..."
-                        className="h-8 w-52 rounded-lg border border-slate-300 pr-3 pl-8 text-xs focus:border-[#1B8EE6] focus:outline-none"
+                        onChange={(e) => {
+                          setTxSearch(e.target.value);
+                          setShowAllTxRows(false);
+                        }}
+                        placeholder="Cari ID TRX, produk, SKU..."
+                        className="h-8 w-52 rounded-lg border border-slate-300 pr-3 pl-8 text-xs focus:border-[#0F172A] focus:outline-none"
                       />
                     </div>
                     <select
                       value={txBranchFilter}
-                      onChange={(e) => setTxBranchFilter(e.target.value)}
-                      className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 focus:border-[#1B8EE6] focus:outline-none"
+                      onChange={(e) => {
+                        setTxBranchFilter(e.target.value);
+                        setShowAllTxRows(false);
+                      }}
+                      className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 focus:border-[#0F172A] focus:outline-none"
                     >
                       <option value="all">Semua Cabang</option>
-                      {branches.map((b) => (
-                        <option key={b.id} value={b.id}>
+                      {unifiedTxBranches.map((b) => (
+                        <option key={b.key} value={b.key}>
                           {b.name}
                         </option>
                       ))}
                     </select>
                     <select
+                      value={txMonthFilter}
+                      onChange={(e) => {
+                        setTxMonthFilter(
+                          e.target.value === 'all'
+                            ? 'all'
+                            : Number(e.target.value)
+                        );
+                        setShowAllTxRows(false);
+                      }}
+                      className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 focus:border-[#0F172A] focus:outline-none"
+                    >
+                      <option value="all">Semua Bulan</option>
+                      {MONTH_OPTIONS.map((m) => (
+                        <option key={m.num} value={m.num}>
+                          {m.full}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={txSourceFilter}
+                      onChange={(e) => {
+                        setTxSourceFilter(
+                          e.target.value as 'all' | 'import' | 'pos'
+                        );
+                        setShowAllTxRows(false);
+                      }}
+                      className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 focus:border-[#0F172A] focus:outline-none"
+                    >
+                      <option value="all">Semua Sumber</option>
+                      <option value="import">Impor Sheet</option>
+                      <option value="pos">Kasir POS</option>
+                    </select>
+                    <select
                       value={txMethodFilter}
-                      onChange={(e) =>
+                      onChange={(e) => {
                         setTxMethodFilter(
                           e.target.value as 'all' | PaymentMethod
-                        )
-                      }
-                      className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 focus:border-[#1B8EE6] focus:outline-none"
+                        );
+                        setShowAllTxRows(false);
+                      }}
+                      className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 focus:border-[#0F172A] focus:outline-none"
                     >
                       <option value="all">Semua Metode</option>
                       <option value="cash">Tunai</option>
@@ -1530,18 +1826,45 @@ export function AdminDashboard({
                     </select>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleExportCsv}
-                    disabled={filteredTx.length === 0}
-                    className="flex h-8 items-center gap-1.5 rounded-lg bg-[#1B8EE6] px-3 text-xs font-bold text-white hover:bg-[#1479C9] disabled:bg-slate-300 whitespace-nowrap"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    <span>Export CSV ({filteredTx.length})</span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="inline-flex rounded-lg border border-slate-300 bg-slate-50 p-0.5 text-[11px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => setTxViewMode('itemized')}
+                        className={`rounded-md px-2.5 py-1 transition-colors whitespace-nowrap ${
+                          txViewMode === 'itemized'
+                            ? 'bg-white text-[#0F172A] shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Rincian Item (Net)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTxViewMode('summary')}
+                        className={`rounded-md px-2.5 py-1 transition-colors whitespace-nowrap ${
+                          txViewMode === 'summary'
+                            ? 'bg-white text-[#0F172A] shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Ringkas per Invoice
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleExportCsv}
+                      disabled={filteredTx.length === 0}
+                      className="flex h-8 items-center gap-1.5 rounded-lg bg-[#0F172A] px-3 text-xs font-bold text-white hover:bg-[#1E293B] disabled:bg-slate-300 whitespace-nowrap"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      <span>Export CSV ({filteredTx.length})</span>
+                    </button>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 border-b border-slate-200 bg-slate-50/70 px-4 py-3 sm:grid-cols-4">
+                <div className="grid grid-cols-2 gap-3 border-b border-slate-200 bg-slate-50/70 px-4 py-3 sm:grid-cols-5">
                   <div>
                     <div className="text-[11px] font-medium text-slate-500">
                       Transaksi Terfilter
@@ -1552,7 +1875,15 @@ export function AdminDashboard({
                   </div>
                   <div>
                     <div className="text-[11px] font-medium text-slate-500">
-                      Omset Kotor (Subtotal)
+                      Kuantitas Terjual
+                    </div>
+                    <div className="font-mono-num text-sm font-bold text-slate-900">
+                      {formatNumber(txSummary.qtySum)} pcs
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-500">
+                      Subtotal Item (Kotor)
                     </div>
                     <div className="font-mono-num text-sm font-bold text-slate-800">
                       {formatRupiah(txSummary.grossSum)}
@@ -1560,7 +1891,7 @@ export function AdminDashboard({
                   </div>
                   <div>
                     <div className="text-[11px] font-medium text-slate-500">
-                      Total Potongan Diskon
+                      Potongan TRX (1×/TRX)
                     </div>
                     <div
                       className={`font-mono-num text-sm font-bold ${
@@ -1576,119 +1907,345 @@ export function AdminDashboard({
                   </div>
                   <div>
                     <div className="text-[11px] font-medium text-slate-500">
-                      Total Omset Bersih
+                      Total Bayar (Net)
                     </div>
-                    <div className="font-mono-num text-sm font-extrabold text-emerald-700">
+                    <div className="font-mono-num text-sm font-extrabold text-[#0F172A]">
                       {formatRupiah(txSummary.netSum)}
                     </div>
                   </div>
                 </div>
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-slate-200 bg-slate-50 text-[11px] text-slate-500">
-                      <tr>
-                        <th className="px-4 py-2.5 font-semibold">Invoice</th>
-                        <th className="px-3 py-2.5 font-semibold">Cabang</th>
-                        <th className="px-3 py-2.5 font-semibold">Waktu</th>
-                        <th className="px-3 py-2.5 font-semibold">Kasir</th>
-                        <th className="px-3 py-2.5 font-semibold">Metode</th>
-                        <th className="px-3 py-2.5 text-right font-semibold">
-                          Subtotal
-                        </th>
-                        <th className="px-3 py-2.5 text-right font-semibold">
-                          Diskon
-                        </th>
-                        <th className="px-3 py-2.5 text-right font-semibold">
-                          Total Bersih
-                        </th>
-                        <th className="px-4 py-2.5 text-right font-semibold">
-                          Struk
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {filteredTx.length === 0 ? (
+                {txViewMode === 'itemized' ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-slate-200 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                         <tr>
-                          <td
-                            colSpan={9}
-                            className="px-4 py-10 text-center text-slate-400"
-                          >
-                            Tidak ada transaksi sesuai filter.
-                          </td>
+                          <th className="px-4 py-2.5 font-semibold">
+                            Waktu & ID
+                          </th>
+                          <th className="px-3 py-2.5 font-semibold">
+                            Item & Harga Satuan
+                          </th>
+                          <th className="px-3 py-2.5 text-center font-semibold">
+                            Qty
+                          </th>
+                          <th className="px-3 py-2.5 font-semibold">
+                            Subtotal Item
+                          </th>
+                          <th className="px-3 py-2.5 text-right font-bold text-[#0F172A]">
+                            Total Bayar (Net)
+                          </th>
+                          <th className="px-4 py-2.5 text-right font-semibold">
+                            Aksi
+                          </th>
                         </tr>
-                      ) : (
-                        filteredTx.map((tx) => {
-                          const rawSub = Math.max(0, Math.round(tx.subtotal || 0));
-                          const rawDisc = Math.max(
-                            0,
-                            Math.round(tx.discountAmount || 0)
-                          );
-                          const rawGrand = Math.max(
-                            0,
-                            Math.round(tx.grandTotal || 0)
-                          );
-                          const net =
-                            rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
-                              ? Math.max(0, rawSub - rawDisc)
-                              : rawGrand;
-                          const gross = Math.max(rawSub, net + rawDisc);
-                          const disc = Math.max(0, gross - net);
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {visibleTxList.length === 0 ? (
+                          <tr>
+                            <td
+                              colSpan={6}
+                              className="px-4 py-10 text-center text-slate-400"
+                            >
+                              Tidak ada transaksi sesuai filter.
+                            </td>
+                          </tr>
+                        ) : (
+                          visibleTxList.flatMap((tx) => {
+                            const { gross, disc, net } =
+                              resolveTxFinancials(tx);
+                            const timeInfo =
+                              txTimeMap.get(tx.id) ?? getEffectiveTxTime(tx);
+                            const rawLines = linesByTxId.get(tx.id) ?? [];
 
-                          return (
-                            <tr key={tx.id} className="hover:bg-slate-50">
-                              <td className="font-mono-num px-4 py-2.5 font-bold text-slate-900">
-                                {tx.invoiceNo}
-                                {tx.source === 'import' && (
-                                  <span className="ml-1.5 text-[10px] font-medium text-slate-400">
-                                    (Impor)
-                                  </span>
-                                )}
-                              </td>
-                              <td className="px-3 py-2.5 font-medium text-slate-700">
-                                {tx.branchName || 'Pusat'}
-                              </td>
-                              <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">
-                                {formatDateTime(tx.createdAt)}
-                              </td>
-                              <td className="px-3 py-2.5 text-slate-700">
-                                {tx.cashierName || 'Admin'}
-                              </td>
-                              <td className="px-3 py-2.5 font-semibold text-slate-700 uppercase">
-                                {tx.paymentMethod}
-                              </td>
-                              <td className="font-mono-num px-3 py-2.5 text-right text-slate-600 whitespace-nowrap">
-                                {formatRupiah(gross)}
-                              </td>
-                              <td className="font-mono-num px-3 py-2.5 text-right whitespace-nowrap">
-                                {disc > 0 ? (
-                                  <span className="font-semibold text-rose-600">
-                                    -{formatRupiah(disc)}
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-400">—</span>
-                                )}
-                              </td>
-                              <td className="font-mono-num px-3 py-2.5 text-right font-bold text-emerald-700 whitespace-nowrap">
-                                {formatRupiah(net)}
-                              </td>
-                              <td className="px-4 py-2.5 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => onViewReceipt(tx)}
-                                  className="inline-flex h-7 items-center gap-1 rounded border border-slate-300 px-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                            if (rawLines.length === 0) {
+                              return [
+                                <tr key={tx.id} className="hover:bg-slate-50">
+                                  <td className="px-4 py-2.5 align-top whitespace-nowrap">
+                                    <div className="font-semibold text-slate-900">
+                                      {timeInfo.shortLabel}
+                                    </div>
+                                    <div className="font-mono-num text-[11px] text-slate-400">
+                                      {tx.invoiceNo}
+                                    </div>
+                                  </td>
+                                  <td className="px-3 py-2.5 align-top">
+                                    <div className="font-semibold text-slate-800">
+                                      Transaksi {tx.branchName || 'Pusat'}
+                                    </div>
+                                    <div className="text-[11px] text-slate-400">
+                                      {tx.cashierName || 'Admin'} ·{' '}
+                                      {tx.paymentMethod.toUpperCase()}
+                                    </div>
+                                  </td>
+                                  <td className="font-mono-num px-3 py-2.5 text-center align-top font-bold text-slate-800">
+                                    {tx.totalQty ?? 0}
+                                  </td>
+                                  <td className="px-3 py-2.5 align-top whitespace-nowrap">
+                                    <div className="font-mono-num font-bold text-emerald-700">
+                                      {formatRupiah(gross)}
+                                    </div>
+                                    {disc > 0 && (
+                                      <div className="mt-0.5 flex items-center gap-1 text-[11px] font-semibold text-rose-600">
+                                        <Tag className="h-3 w-3 shrink-0" />
+                                        <span>
+                                          Potongan TRX: -{formatRupiah(disc)}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="font-mono-num px-3 py-2.5 text-right align-top font-extrabold text-[#0F172A] whitespace-nowrap">
+                                    {formatRupiah(net)}
+                                  </td>
+                                  <td className="px-4 py-2.5 text-right align-top whitespace-nowrap">
+                                    <button
+                                      type="button"
+                                      onClick={() => onViewReceipt(tx)}
+                                      className="inline-flex h-7 items-center gap-1 rounded border border-slate-300 px-2.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                                    >
+                                      <ReceiptText className="h-3 w-3" />
+                                      <span>Struk</span>
+                                    </button>
+                                  </td>
+                                </tr>,
+                              ];
+                            }
+
+                            // Sort GRATIS items first to match legacy Riwayat Transaksi visual grouping
+                            const sortedLines = [...rawLines].sort((a, b) => {
+                              const aFree =
+                                a.unitPrice === 0 ||
+                                (a.lineTotal === 0 && net > 0)
+                                  ? 0
+                                  : 1;
+                              const bFree =
+                                b.unitPrice === 0 ||
+                                (b.lineTotal === 0 && net > 0)
+                                  ? 0
+                                  : 1;
+                              return aFree - bFree;
+                            });
+
+                            return sortedLines.map((line, idx) => {
+                              const isFirst = idx === 0;
+                              const liveProd = productById.get(line.productId);
+                              const itemName =
+                                liveProd?.name ?? line.productName;
+                              const isFree =
+                                line.unitPrice === 0 ||
+                                (line.lineTotal === 0 && net > 0);
+                              const displayUnitPrice = isFree
+                                ? 0
+                                : line.unitPrice;
+                              const itemGross = isFree
+                                ? 0
+                                : displayUnitPrice > 0
+                                  ? displayUnitPrice * line.qty
+                                  : line.lineTotal;
+
+                              return (
+                                <tr
+                                  key={`${tx.id}-${line.id}`}
+                                  className={`hover:bg-slate-50 ${
+                                    isFirst
+                                      ? 'border-t border-slate-200/80'
+                                      : ''
+                                  }`}
                                 >
-                                  <ReceiptText className="h-3 w-3" />
-                                  <span>Lihat</span>
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                                  <td className="px-4 py-2.5 align-top whitespace-nowrap">
+                                    <div className="font-semibold text-slate-900">
+                                      {timeInfo.shortLabel}
+                                    </div>
+                                    <div className="font-mono-num text-[11px] text-slate-400">
+                                      {tx.invoiceNo}
+                                    </div>
+                                  </td>
+                                  <td className="px-3 py-2.5 align-top">
+                                    <div className="flex flex-wrap items-center gap-1.5 font-semibold text-slate-900">
+                                      <span>{itemName}</span>
+                                      {isFree && (
+                                        <span className="rounded bg-amber-400 px-1.5 py-0.5 text-[10px] font-extrabold tracking-wide text-slate-900">
+                                          GRATIS
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="font-mono-num mt-0.5 text-[11px] text-slate-400">
+                                      @ {formatRupiah(displayUnitPrice)}
+                                      {line.productSku
+                                        ? ` · ${line.productSku}`
+                                        : ''}
+                                    </div>
+                                  </td>
+                                  <td className="font-mono-num px-3 py-2.5 text-center align-top font-bold text-slate-800">
+                                    {line.qty}
+                                  </td>
+                                  <td className="px-3 py-2.5 align-top whitespace-nowrap">
+                                    <div className="font-mono-num font-bold text-emerald-700">
+                                      {formatRupiah(itemGross)}
+                                    </div>
+                                    {isFirst && disc > 0 && (
+                                      <div className="mt-0.5 flex items-center gap-1 text-[11px] font-semibold text-rose-600">
+                                        <Tag className="h-3 w-3 shrink-0" />
+                                        <span>
+                                          Potongan TRX: -{formatRupiah(disc)}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="font-mono-num px-3 py-2.5 text-right align-top whitespace-nowrap">
+                                    {isFirst ? (
+                                      <span className="text-[13px] font-extrabold text-[#0F172A]">
+                                        {formatRupiah(net)}
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-300">-</span>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-2.5 text-right align-top whitespace-nowrap">
+                                    {isFirst ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => onViewReceipt(tx)}
+                                        className="inline-flex h-7 items-center gap-1 rounded border border-slate-300 px-2.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                                      >
+                                        <ReceiptText className="h-3 w-3" />
+                                        <span>Struk</span>
+                                      </button>
+                                    ) : (
+                                      <span className="text-[11px] text-slate-300">
+                                        —
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-slate-200 bg-slate-50 text-[11px] text-slate-500">
+                        <tr>
+                          <th className="px-4 py-2.5 font-semibold">Invoice</th>
+                          <th className="px-3 py-2.5 font-semibold">Cabang</th>
+                          <th className="px-3 py-2.5 font-semibold">Waktu</th>
+                          <th className="px-3 py-2.5 font-semibold">Kasir</th>
+                          <th className="px-3 py-2.5 font-semibold">Metode</th>
+                          <th className="px-3 py-2.5 text-right font-semibold">
+                            Subtotal
+                          </th>
+                          <th className="px-3 py-2.5 text-right font-semibold">
+                            Potongan TRX
+                          </th>
+                          <th className="px-3 py-2.5 text-right font-bold text-[#0F172A]">
+                            Total Bayar (Net)
+                          </th>
+                          <th className="px-4 py-2.5 text-right font-semibold">
+                            Struk
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {visibleTxList.length === 0 ? (
+                          <tr>
+                            <td
+                              colSpan={9}
+                              className="px-4 py-10 text-center text-slate-400"
+                            >
+                              Tidak ada transaksi sesuai filter.
+                            </td>
+                          </tr>
+                        ) : (
+                          visibleTxList.map((tx) => {
+                            const { gross, disc, net } =
+                              resolveTxFinancials(tx);
+                            const timeInfo =
+                              txTimeMap.get(tx.id) ?? getEffectiveTxTime(tx);
+
+                            return (
+                              <tr key={tx.id} className="hover:bg-slate-50">
+                                <td className="font-mono-num px-4 py-2.5 font-bold text-slate-900">
+                                  {tx.invoiceNo}
+                                  {tx.source === 'import' && (
+                                    <span className="ml-1.5 text-[10px] font-medium text-slate-400">
+                                      (Impor)
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2.5 font-medium text-slate-700">
+                                  {tx.branchName || 'Pusat'}
+                                </td>
+                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">
+                                  {timeInfo.dateLabel}
+                                </td>
+                                <td className="px-3 py-2.5 text-slate-700">
+                                  {tx.cashierName || 'Admin'}
+                                </td>
+                                <td className="px-3 py-2.5 font-semibold text-slate-700 uppercase">
+                                  {tx.paymentMethod}
+                                </td>
+                                <td className="font-mono-num px-3 py-2.5 text-right text-slate-600 whitespace-nowrap">
+                                  {formatRupiah(gross)}
+                                </td>
+                                <td className="font-mono-num px-3 py-2.5 text-right whitespace-nowrap">
+                                  {disc > 0 ? (
+                                    <span className="font-semibold text-rose-600">
+                                      -{formatRupiah(disc)}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-400">—</span>
+                                  )}
+                                </td>
+                                <td className="font-mono-num px-3 py-2.5 text-right font-extrabold text-[#0F172A] whitespace-nowrap">
+                                  {formatRupiah(net)}
+                                </td>
+                                <td className="px-4 py-2.5 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() => onViewReceipt(tx)}
+                                    className="inline-flex h-7 items-center gap-1 rounded border border-slate-300 px-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                                  >
+                                    <ReceiptText className="h-3 w-3" />
+                                    <span>Lihat</span>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {filteredTx.length > 100 && (
+                  <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-600">
+                    <span>
+                      Menampilkan{' '}
+                      <strong className="font-mono-num text-slate-900">
+                        {visibleTxList.length}
+                      </strong>{' '}
+                      dari{' '}
+                      <strong className="font-mono-num text-slate-900">
+                        {filteredTx.length}
+                      </strong>{' '}
+                      transaksi
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowAllTxRows((v) => !v)}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      {showAllTxRows
+                        ? 'Ringkas (100 terbaru)'
+                        : `Tampilkan Semua (${filteredTx.length})`}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1713,6 +2270,52 @@ export function AdminDashboard({
             };
           }}
           onClose={() => setProdBarcodeScanOpen(false)}
+        />
+      )}
+
+      {reportExportOpen && (
+        <ReportExportModal
+          profile={profile}
+          branches={branches}
+          products={products}
+          transactions={transactions}
+          salesLines={salesLines}
+          onClose={() => setReportExportOpen(false)}
+          onNotify={flashNotice}
+        />
+      )}
+
+      {quickEditProduct && (
+        <QuickProductEditModal
+          product={quickEditProduct}
+          branches={branches}
+          branchStocks={branchStocks}
+          defaultBranchId={activeBranchId}
+          onClose={() => setQuickEditProduct(null)}
+          onSave={async ({ price, stockQty, branchId }) => {
+            await onSaveProduct({
+              id: quickEditProduct.id,
+              sku: quickEditProduct.sku,
+              barcode: quickEditProduct.barcode,
+              name: quickEditProduct.name,
+              price,
+              image: quickEditProduct.image,
+              category: quickEditProduct.category,
+            });
+            const targetBranch = branches.find((b) => b.id === branchId) || branches[0];
+            const currentStk = branchStocks.find((s) => s.productId === quickEditProduct.id && s.branchId === branchId)?.currentStock ?? 0;
+            if (stockQty !== currentStk && targetBranch) {
+              await onAdjustStock({
+                branchId: targetBranch.id,
+                branchName: targetBranch.name,
+                product: quickEditProduct,
+                mode: 'opname',
+                qtyInput: stockQty,
+                note: 'Edit cepat harga & stok dari tabel produk',
+              });
+            }
+          }}
+          onNotify={flashNotice}
         />
       )}
     </div>

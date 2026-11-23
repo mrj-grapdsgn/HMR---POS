@@ -332,7 +332,7 @@ export function ProductSearchScan({
                     outOfStock
                       ? 'cursor-not-allowed bg-slate-50/70 opacity-60'
                       : active
-                        ? 'bg-sky-50'
+                        ? 'bg-slate-50'
                         : 'hover:bg-slate-50'
                   }`}
                 >
@@ -369,7 +369,7 @@ export function ProductSearchScan({
                       </div>
                     </div>
                   </div>
-                  <span className="font-mono-num shrink-0 text-xs font-bold text-[#1B8EE6]">
+                  <span className="font-mono-num shrink-0 text-xs font-bold text-[#0F172A]">
                     {formatRupiah(p.price)}
                   </span>
                 </button>

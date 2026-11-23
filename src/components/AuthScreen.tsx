@@ -181,7 +181,7 @@ export function AuthScreen() {
     <div className="flex min-h-screen w-screen items-center justify-center bg-slate-100 p-4">
       <div className="w-full max-w-md overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
         {/* Top Brand Band */}
-        <div className="bg-[#1B8EE6] px-6 py-5 text-white">
+        <div className="bg-[#0F172A] px-6 py-5 text-white">
           <div className="flex items-center gap-2.5">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/15">
               <Store className="h-5 w-5" />
@@ -207,7 +207,7 @@ export function AuthScreen() {
             }}
             className={`rounded-lg py-2 text-xs font-bold transition-colors ${
               mode === 'login'
-                ? 'bg-white text-[#1B8EE6] shadow-sm'
+                ? 'bg-white text-[#0F172A] shadow-sm'
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
@@ -221,7 +221,7 @@ export function AuthScreen() {
             }}
             className={`rounded-lg py-2 text-xs font-bold transition-colors ${
               mode === 'register'
-                ? 'bg-white text-[#1B8EE6] shadow-sm'
+                ? 'bg-white text-[#0F172A] shadow-sm'
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
@@ -245,7 +245,7 @@ export function AuthScreen() {
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
                     placeholder="Contoh: Budi Santoso"
-                    className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#1B8EE6] focus:outline-none focus:ring-2 focus:ring-sky-100"
+                    className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#0F172A] focus:outline-none focus:ring-2 focus:ring-slate-100"
                   />
                 </div>
               </div>
@@ -262,7 +262,7 @@ export function AuthScreen() {
                     value={storeName}
                     onChange={(e) => setStoreName(e.target.value)}
                     placeholder="Contoh: Kopi Nusantara"
-                    className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#1B8EE6] focus:outline-none focus:ring-2 focus:ring-sky-100"
+                    className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#0F172A] focus:outline-none focus:ring-2 focus:ring-slate-100"
                   />
                 </div>
               </div>
@@ -287,7 +287,7 @@ export function AuthScreen() {
                   setUsername(e.target.value.replace(/\s+/g, ''))
                 }
                 placeholder="Contoh: admin_toko"
-                className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#1B8EE6] focus:outline-none focus:ring-2 focus:ring-sky-100"
+                className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#0F172A] focus:outline-none focus:ring-2 focus:ring-slate-100"
               />
             </div>
             {mode === 'register' && (
@@ -313,7 +313,7 @@ export function AuthScreen() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Minimal 6 karakter"
-                className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-10 pl-9 text-sm text-slate-900 focus:border-[#1B8EE6] focus:outline-none focus:ring-2 focus:ring-sky-100"
+                className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-10 pl-9 text-sm text-slate-900 focus:border-[#0F172A] focus:outline-none focus:ring-2 focus:ring-slate-100"
               />
               <button
                 type="button"
@@ -345,7 +345,7 @@ export function AuthScreen() {
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder="Ulangi kata sandi"
-                  className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#1B8EE6] focus:outline-none focus:ring-2 focus:ring-sky-100"
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm text-slate-900 focus:border-[#0F172A] focus:outline-none focus:ring-2 focus:ring-slate-100"
                 />
               </div>
             </div>
@@ -382,7 +382,7 @@ export function AuthScreen() {
           <button
             type="submit"
             disabled={loading}
-            className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-[#1B8EE6] text-sm font-bold text-white shadow-sm transition-colors hover:bg-[#1479C9] disabled:bg-slate-300"
+            className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-[#0F172A] text-sm font-bold text-white shadow-sm transition-colors hover:bg-[#1E293B] disabled:bg-slate-300"
           >
             {loading && <Loader2 className="h-4 w-4 animate-spin" />}
             <span>

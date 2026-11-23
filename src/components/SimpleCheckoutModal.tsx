@@ -69,7 +69,7 @@ export function SimpleCheckoutModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 backdrop-blur-[1px]">
       <div className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl">
-        <div className="flex items-center justify-between bg-[#1B8EE6] px-5 py-3.5 text-white">
+        <div className="flex items-center justify-between bg-[#0F172A] px-5 py-3.5 text-white">
           <div>
             <h2 className="text-sm font-bold">Konfirmasi Pembayaran</h2>
             {branchName && (
@@ -139,7 +139,7 @@ export function SimpleCheckoutModal({
                   onClick={() => setMethod(m.id)}
                   className={`flex items-center justify-center gap-1.5 rounded-lg border py-2.5 text-xs font-bold transition-colors ${
                     method === m.id
-                      ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                      ? 'border-[#0F172A] bg-slate-50 text-[#0F172A]'
                       : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                   }`}
                 >
@@ -162,7 +162,7 @@ export function SimpleCheckoutModal({
                   min={0}
                   value={paidStr}
                   onChange={(e) => setPaidStr(e.target.value)}
-                  className="font-mono-num h-11 w-full rounded-lg border border-slate-300 px-3 text-base font-bold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                  className="font-mono-num h-11 w-full rounded-lg border border-slate-300 px-3 text-base font-bold text-slate-900 focus:border-[#0F172A] focus:outline-none"
                 />
               </div>
 
@@ -172,7 +172,7 @@ export function SimpleCheckoutModal({
                     key={amt}
                     type="button"
                     onClick={() => setPaidStr(String(amt))}
-                    className="rounded-md border border-sky-200 bg-sky-50 py-1.5 text-xs font-bold text-[#1B8EE6] hover:bg-sky-100 tabular-nums"
+                    className="rounded-md border border-slate-200 bg-slate-50 py-1.5 text-xs font-bold text-[#0F172A] hover:bg-slate-100 tabular-nums"
                   >
                     {i === 0 ? 'Uang Pas' : formatNumber(amt)}
                   </button>
@@ -246,7 +246,7 @@ export function SimpleReceiptModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 backdrop-blur-[1px]">
       <div className="flex max-h-[90vh] w-full max-w-sm flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
-        <div className="flex items-center justify-between bg-[#1B8EE6] px-4 py-3 text-white">
+        <div className="flex items-center justify-between bg-[#0F172A] px-4 py-3 text-white">
           <h2 className="text-sm font-bold">Struk Pembayaran</h2>
           <button
             type="button"
@@ -349,7 +349,7 @@ export function SimpleReceiptModal({
           <button
             type="button"
             onClick={() => window.print()}
-            className="flex h-10 items-center gap-1.5 rounded-lg bg-[#1B8EE6] px-4 text-xs font-bold text-white hover:bg-[#1479C9]"
+            className="flex h-10 items-center gap-1.5 rounded-lg bg-[#0F172A] px-4 text-xs font-bold text-white hover:bg-[#1E293B]"
           >
             <Printer className="h-4 w-4" />
             <span>Cetak Struk</span>
@@ -374,7 +374,7 @@ export function SimpleHistoryModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 backdrop-blur-[1px]">
       <div className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
-        <div className="flex items-center justify-between bg-[#1B8EE6] px-5 py-3.5 text-white">
+        <div className="flex items-center justify-between bg-[#0F172A] px-5 py-3.5 text-white">
           <div>
             <h2 className="text-sm font-bold">Riwayat Transaksi</h2>
             <p className="text-[11px] text-white/85">

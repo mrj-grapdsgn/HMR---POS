@@ -18,6 +18,7 @@ import {
   SimpleTransaction,
 } from '../types/pos';
 import { formatNumber, formatRupiah } from '../utils/format';
+import { normalizeBranchKey } from '../utils/productCategory';
 
 interface RestockAnalyticsPanelProps {
   branches: Branch[];
@@ -62,7 +63,10 @@ function classifyRestock(
   currentStock: number,
   qtySold: number
 ): Pick<RestockRow, 'pctSold' | 'status' | 'urgency' | 'recommendation'> {
-  const denom = Math.max(initialStock, currentStock + qtySold);
+  const denom =
+    initialStock > 0 && initialStock >= currentStock
+      ? initialStock
+      : Math.max(initialStock, currentStock + qtySold);
   const pctSold =
     denom > 0 ? Math.min(100, Math.max(0, ((denom - currentStock) / denom) * 100)) : 0;
 
@@ -106,7 +110,10 @@ export function RestockAnalyticsPanel({
   salesLines,
   onQuickRestock,
 }: RestockAnalyticsPanelProps) {
-  const [selectedBranchId, setSelectedBranchId] = useState<string>('all');
+  const [selectedBranchKey, setSelectedBranchKey] = useState<string>('all');
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'import' | 'pos'>(
+    'all'
+  );
   const [selectedMonths, setSelectedMonths] = useState<number[]>([]);
   const availableYears = useMemo(() => {
     const yrs = new Set<number>([new Date().getFullYear()]);
@@ -117,6 +124,49 @@ export function RestockAnalyticsPanel({
     return Array.from(yrs).sort((a, b) => b - a);
   }, [salesLines, transactions]);
   const [selectedYear, setSelectedYear] = useState<number | 'all'>('all');
+
+  // Consolidate branches sharing the same normalized key (e.g., "CFD_Senayan" and "CFD Senayan")
+  const unifiedBranches = useMemo(() => {
+    const map = new Map<
+      string,
+      { key: string; primary: Branch; branchIds: Set<string>; codes: string[] }
+    >();
+    for (const b of branches) {
+      const key = normalizeBranchKey(b.name);
+      const existing = map.get(key);
+      if (existing) {
+        existing.branchIds.add(b.id);
+        if (b.code && !existing.codes.includes(b.code)) {
+          existing.codes.push(b.code);
+        }
+        if (existing.primary.name.includes('_') && !b.name.includes('_')) {
+          existing.primary = b;
+        }
+      } else {
+        map.set(key, {
+          key,
+          primary: b,
+          branchIds: new Set([b.id]),
+          codes: b.code ? [b.code] : [],
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [branches]);
+
+  const branchNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    branches.forEach((b) => map.set(b.id, b.name));
+    return map;
+  }, [branches]);
+
+  const activeUnifiedBranch = useMemo(
+    () =>
+      selectedBranchKey === 'all'
+        ? null
+        : unifiedBranches.find((u) => u.key === selectedBranchKey) ?? null,
+    [unifiedBranches, selectedBranchKey]
+  );
 
   // Quick restock modal state
   const [restockTarget, setRestockTarget] = useState<Product | null>(null);
@@ -137,9 +187,43 @@ export function RestockAnalyticsPanel({
     return map;
   }, [products]);
 
+  const productBySkuKey = useMemo(() => {
+    const map = new Map<string, Product>();
+    products.forEach((p) => {
+      const k = p.sku.trim().toLowerCase();
+      if (k && !map.has(k)) map.set(k, p);
+    });
+    return map;
+  }, [products]);
+
+  const txById = useMemo(() => {
+    const map = new Map<string, SimpleTransaction>();
+    transactions.forEach((tx) => map.set(tx.id, tx));
+    return map;
+  }, [transactions]);
+
+  const sourceCounts = useMemo(() => {
+    let importLines = 0;
+    let posLines = 0;
+    for (const line of salesLines) {
+      if (line.source === 'pos') posLines += 1;
+      else importLines += 1;
+    }
+    return { importLines, posLines };
+  }, [salesLines]);
+
   const filteredLines = useMemo(() => {
     return salesLines.filter((line) => {
-      if (selectedBranchId !== 'all' && line.branchId !== selectedBranchId) {
+      if (selectedBranchKey !== 'all') {
+        const matchById = activeUnifiedBranch?.branchIds.has(line.branchId);
+        const lineBranchKey = normalizeBranchKey(
+          line.branchName || branchNameById.get(line.branchId) || ''
+        );
+        if (!matchById && lineBranchKey !== selectedBranchKey) {
+          return false;
+        }
+      }
+      if (sourceFilter !== 'all' && line.source !== sourceFilter) {
         return false;
       }
       if (selectedYear !== 'all' && line.saleYear !== selectedYear) {
@@ -153,139 +237,91 @@ export function RestockAnalyticsPanel({
       }
       return true;
     });
-  }, [salesLines, selectedBranchId, selectedYear, selectedMonths]);
+  }, [
+    salesLines,
+    selectedBranchKey,
+    activeUnifiedBranch,
+    branchNameById,
+    sourceFilter,
+    selectedYear,
+    selectedMonths,
+  ]);
 
-  const filteredTransactions = useMemo(() => {
-    return transactions.filter((tx) => {
-      if (selectedBranchId !== 'all' && tx.branchId !== selectedBranchId) {
-        return false;
+  // Compute unique transaction count, gross subtotal & total discount directly from filtered salesLines (matching Sheet COUNTUNIQUE(ID Transaksi))
+  const { filteredTxCount, filteredGrossTotal, filteredDiscountTotal } =
+    useMemo(() => {
+      const uniqueTxKeys = new Set<string>();
+      const countedTxIds = new Set<string>();
+      let totalGross = 0;
+      let totalDiscount = 0;
+      for (const line of filteredLines) {
+        if (line.qty <= 0) continue;
+        const tx = txById.get(line.transactionId);
+        const branchScopeKey = normalizeBranchKey(
+          line.branchName || branchNameById.get(line.branchId) || line.branchId
+        );
+        const canonicalCode = tx?.invoiceNo?.trim().toLowerCase();
+        if (canonicalCode) {
+          uniqueTxKeys.add(`${branchScopeKey}::${canonicalCode}`);
+        } else if (line.transactionId) {
+          uniqueTxKeys.add(`${branchScopeKey}::${line.transactionId}`);
+        }
+        if (tx) {
+          if (!countedTxIds.has(tx.id)) {
+            countedTxIds.add(tx.id);
+            const rawSub = Math.max(0, Math.round(tx.subtotal || 0));
+            const rawDisc = Math.max(0, Math.round(tx.discountAmount || 0));
+            const rawGrand = Math.max(0, Math.round(tx.grandTotal || 0));
+            const txGross = Math.max(rawSub, rawGrand + rawDisc);
+            totalGross += txGross;
+            if (rawDisc > 0) {
+              totalDiscount += rawDisc;
+            }
+          }
+        } else {
+          totalGross += line.lineTotal;
+        }
       }
-      if (selectedYear !== 'all' && tx.saleYear !== selectedYear) {
-        return false;
-      }
-      if (
-        selectedMonths.length > 0 &&
-        (!tx.saleMonth || !selectedMonths.includes(tx.saleMonth))
-      ) {
-        return false;
-      }
-      return true;
-    });
-  }, [transactions, selectedBranchId, selectedYear, selectedMonths]);
-
-  const filteredTxCount = filteredTransactions.length;
+      return {
+        filteredTxCount: uniqueTxKeys.size,
+        filteredGrossTotal: totalGross,
+        filteredDiscountTotal: totalDiscount,
+      };
+    }, [filteredLines, txById, branchNameById]);
 
   const analytics = useMemo(() => {
-    const skuMap = new Map<string, AggregatedSku>();
+    const skuMap = new Map<string, AggregatedSku & { skuKey: string }>();
     let totalRevenue = 0;
-    let totalGrossRevenue = 0;
-    let totalDiscount = 0;
     let totalQty = 0;
 
-    // Build canonical net/gross/discount metrics per filtered transaction
-    const txMetricsById = new Map<
-      string,
-      { gross: number; discount: number; net: number }
-    >();
-    for (const tx of filteredTransactions) {
-      const rawSub = Math.max(0, Math.round(tx.subtotal || 0));
-      const rawDisc = Math.max(0, Math.round(tx.discountAmount || 0));
-      const rawGrand = Math.max(0, Math.round(tx.grandTotal || 0));
-      // Guard against any legacy record where grandTotal wasn't deducted by discountAmount
-      const net =
-        rawDisc > 0 && rawGrand >= rawSub && rawSub > 0
-          ? Math.max(0, rawSub - rawDisc)
-          : rawGrand;
-      const gross = Math.max(rawSub, net + rawDisc);
-      const discount = Math.max(0, gross - net);
-      txMetricsById.set(tx.id, { gross, discount, net });
-    }
-
-    // Group filtered salesLines by transactionId so lines can be reconciled to exact net tx total
-    const linesByTx = new Map<string, SalesLine[]>();
-    const orphanLines: SalesLine[] = [];
     for (const line of filteredLines) {
-      if (line.transactionId && txMetricsById.has(line.transactionId)) {
-        const bucket = linesByTx.get(line.transactionId) ?? [];
-        bucket.push(line);
-        linesByTx.set(line.transactionId, bucket);
-      } else {
-        orphanLines.push(line);
-      }
-    }
-
-    const addSkuLine = (line: SalesLine, effectiveTotal: number) => {
-      totalRevenue += effectiveTotal;
+      totalRevenue += line.lineTotal;
       totalQty += line.qty;
-      const existing = skuMap.get(line.productId);
-      const liveProd = productById.get(line.productId);
+      if (line.qty <= 0) continue;
+
+      const liveProd =
+        productById.get(line.productId) ??
+        productBySkuKey.get((line.productSku || '').trim().toLowerCase());
+      const resolvedSku = (liveProd?.sku || line.productSku || line.productId).trim();
+      const skuKey = resolvedSku.toLowerCase();
+      const existing = skuMap.get(skuKey);
       if (existing) {
         existing.qtySold += line.qty;
-        existing.totalSales += effectiveTotal;
+        existing.totalSales += line.lineTotal;
+        if (!productById.has(existing.productId) && liveProd) {
+          existing.productId = liveProd.id;
+        }
       } else {
-        skuMap.set(line.productId, {
-          productId: line.productId,
-          sku: liveProd?.sku ?? line.productSku,
+        skuMap.set(skuKey, {
+          skuKey,
+          productId: liveProd?.id ?? line.productId,
+          sku: resolvedSku,
           name: liveProd?.name ?? line.productName,
           category: liveProd?.category ?? line.category,
           qtySold: line.qty,
-          totalSales: effectiveTotal,
+          totalSales: line.lineTotal,
         });
       }
-    };
-
-    // Process every filtered transaction anchored to its post-discount net total
-    for (const [txId, metrics] of txMetricsById.entries()) {
-      const txLines = linesByTx.get(txId);
-      if (!txLines || txLines.length === 0) {
-        totalRevenue += metrics.net;
-        totalGrossRevenue += metrics.gross;
-        totalDiscount += metrics.discount;
-        continue;
-      }
-
-      totalGrossRevenue += metrics.gross;
-      totalDiscount += metrics.discount;
-
-      const rawLinesSum = txLines.reduce((s, l) => s + l.lineTotal, 0);
-      if (Math.abs(rawLinesSum - metrics.net) <= 1) {
-        for (const line of txLines) {
-          addSkuLine(line, line.lineTotal);
-        }
-      } else if (rawLinesSum > 0) {
-        // Scale lines proportionally so SKU omset & Total Omset both match net grandTotal after discount
-        const scaled = txLines.map((l) =>
-          Math.max(0, Math.round((l.lineTotal / rawLinesSum) * metrics.net))
-        );
-        const scaledSum = scaled.reduce((a, b) => a + b, 0);
-        if (scaled.length > 0 && scaledSum !== metrics.net) {
-          let maxIdx = 0;
-          for (let i = 1; i < scaled.length; i++) {
-            if (scaled[i] > scaled[maxIdx]) maxIdx = i;
-          }
-          scaled[maxIdx] = Math.max(0, scaled[maxIdx] + (metrics.net - scaledSum));
-        }
-        txLines.forEach((line, i) => addSkuLine(line, scaled[i]));
-      } else {
-        // rawLinesSum === 0 (e.g. legacy 0-price lines) while txNet > 0: distribute by qty
-        const totalLineQty = txLines.reduce((s, l) => s + Math.max(1, l.qty), 0);
-        const distributed = txLines.map((l) =>
-          totalLineQty > 0
-            ? Math.round((Math.max(1, l.qty) / totalLineQty) * metrics.net)
-            : 0
-        );
-        const distSum = distributed.reduce((a, b) => a + b, 0);
-        if (distributed.length > 0 && distSum !== metrics.net) {
-          distributed[0] = Math.max(0, distributed[0] + (metrics.net - distSum));
-        }
-        txLines.forEach((line, i) => addSkuLine(line, distributed[i]));
-      }
-    }
-
-    // Include any orphan salesLines (whose transaction doc isn't in filteredTransactions)
-    for (const line of orphanLines) {
-      totalGrossRevenue += line.lineTotal;
-      addSkuLine(line, line.lineTotal);
     }
 
     const allSkus = Array.from(skuMap.values());
@@ -298,34 +334,42 @@ export function RestockAnalyticsPanel({
       .sort((a, b) => b.totalSales - a.totalSales || b.qtySold - a.qtySold)
       .slice(0, 10);
 
-    const topQtyIds = new Set(topByQty.map((x) => x.productId));
-    const topRevIds = new Set(topByRevenue.map((x) => x.productId));
+    const topQtyKeys = new Set(topByQty.map((x) => x.skuKey));
+    const topRevKeys = new Set(topByRevenue.map((x) => x.skuKey));
 
     // Combine top 10 by qty + top 10 by revenue preserving order (matching the spreadsheet)
-    const combinedMap = new Map<string, AggregatedSku>();
-    for (const item of topByQty) combinedMap.set(item.productId, item);
+    const combinedMap = new Map<string, AggregatedSku & { skuKey: string }>();
+    for (const item of topByQty) combinedMap.set(item.skuKey, item);
     for (const item of topByRevenue) {
-      if (!combinedMap.has(item.productId)) {
-        combinedMap.set(item.productId, item);
+      if (!combinedMap.has(item.skuKey)) {
+        combinedMap.set(item.skuKey, item);
       }
     }
 
-    // Stock aggregation scoped to selectedBranchId (or consolidated across all branches)
+    // Stock aggregation scoped to selectedBranchKey (or consolidated across all branches), keyed by normalized SKU
     const stockAgg = new Map<string, { initial: number; current: number }>();
     for (const st of branchStocks) {
-      if (selectedBranchId !== 'all' && st.branchId !== selectedBranchId) {
-        continue;
+      if (selectedBranchKey !== 'all') {
+        const matchById = activeUnifiedBranch?.branchIds.has(st.branchId);
+        const stBranchKey = normalizeBranchKey(
+          branchNameById.get(st.branchId) || ''
+        );
+        if (!matchById && stBranchKey !== selectedBranchKey) {
+          continue;
+        }
       }
-      const prev = stockAgg.get(st.productId) ?? { initial: 0, current: 0 };
+      const prod = productById.get(st.productId);
+      const skuKey = (prod?.sku || st.productId).trim().toLowerCase();
+      const prev = stockAgg.get(skuKey) ?? { initial: 0, current: 0 };
       prev.initial += st.initialStock;
       prev.current += st.currentStock;
-      stockAgg.set(st.productId, prev);
+      stockAgg.set(skuKey, prev);
     }
 
     const restockRows: RestockRow[] = Array.from(combinedMap.values()).map(
       (item) => {
-        const inQty = topQtyIds.has(item.productId);
-        const inRev = topRevIds.has(item.productId);
+        const inQty = topQtyKeys.has(item.skuKey);
+        const inRev = topRevKeys.has(item.skuKey);
         const criteria: RestockRow['criteria'] =
           inQty && inRev
             ? 'Top Terlaris & Omset'
@@ -333,7 +377,7 @@ export function RestockAnalyticsPanel({
               ? 'Top Terlaris'
               : 'Top Omset';
 
-        const stock = stockAgg.get(item.productId) ?? { initial: 0, current: 0 };
+        const stock = stockAgg.get(item.skuKey) ?? { initial: 0, current: 0 };
         const classified = classifyRestock(
           stock.initial,
           stock.current,
@@ -341,7 +385,12 @@ export function RestockAnalyticsPanel({
         );
 
         return {
-          ...item,
+          productId: item.productId,
+          sku: item.sku,
+          name: item.name,
+          category: item.category,
+          qtySold: item.qtySold,
+          totalSales: item.totalSales,
           criteria,
           initialStock: stock.initial,
           currentStock: stock.current,
@@ -364,25 +413,30 @@ export function RestockAnalyticsPanel({
       { qtySold: 0, totalSales: 0, initialStock: 0, currentStock: 0 }
     );
 
+    const overallDenom = Math.max(
+      restockTotals.initialStock,
+      restockTotals.currentStock
+    );
     const overallPctSold =
-      restockTotals.initialStock > 0
+      overallDenom > 0
         ? Math.min(
             100,
             Math.max(
               0,
-              ((restockTotals.initialStock - restockTotals.currentStock) /
-                restockTotals.initialStock) *
-                100
+              ((overallDenom - restockTotals.currentStock) / overallDenom) * 100
             )
           )
         : 0;
 
+    const paidSkuCount = allSkus.filter((s) => s.totalSales > 0).length;
+    const freeSkuCount = allSkus.length - paidSkuCount;
+
     return {
       totalRevenue,
-      totalGrossRevenue,
-      totalDiscount,
       totalQty,
       uniqueSkuCount: allSkus.length,
+      paidSkuCount,
+      freeSkuCount,
       topByQty,
       topByRevenue,
       topQtyTotals: {
@@ -400,25 +454,25 @@ export function RestockAnalyticsPanel({
     };
   }, [
     filteredLines,
-    filteredTransactions,
     branchStocks,
-    selectedBranchId,
+    selectedBranchKey,
+    activeUnifiedBranch,
+    branchNameById,
     productById,
+    productBySkuKey,
   ]);
 
   const activeBranchLabel =
-    selectedBranchId === 'all'
+    selectedBranchKey === 'all'
       ? 'Semua Cabang (Konsolidasi)'
-      : branches.find((b) => b.id === selectedBranchId)?.name ?? 'Cabang';
+      : activeUnifiedBranch?.primary.name ?? 'Cabang';
 
   const openQuickRestock = (productId: string) => {
     const prod = productById.get(productId);
     if (!prod) return;
     setRestockTarget(prod);
     setRestockBranchId(
-      selectedBranchId !== 'all'
-        ? selectedBranchId
-        : branches[0]?.id ?? ''
+      activeUnifiedBranch?.primary.id ?? branches[0]?.id ?? ''
     );
     setRestockQty('10');
     setRestockNote('Restok cepat dari Dasbor Analisis Prioritas');
@@ -506,6 +560,9 @@ export function RestockAnalyticsPanel({
                     )
                     .join(', ')}{' '}
               · {selectedYear === 'all' ? 'Semua Tahun' : selectedYear}
+              {sourceFilter !== 'all'
+                ? ` · ${sourceFilter === 'import' ? 'Khusus Impor Sheet' : 'Khusus Kasir POS'}`
+                : ''}
             </p>
           </div>
           <button
@@ -521,20 +578,20 @@ export function RestockAnalyticsPanel({
 
         <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-12">
           {/* Branch Picker */}
-          <div className="lg:col-span-4">
+          <div className="lg:col-span-3">
             <label className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
               <Building2 className="h-3.5 w-3.5" />
               <span>Pilih Cabang</span>
             </label>
             <select
-              value={selectedBranchId}
-              onChange={(e) => setSelectedBranchId(e.target.value)}
-              className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-800 focus:border-[#1B8EE6] focus:outline-none"
+              value={selectedBranchKey}
+              onChange={(e) => setSelectedBranchKey(e.target.value)}
+              className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-800 focus:border-[#0F172A] focus:outline-none"
             >
               <option value="all">Semua Cabang (Konsolidasi)</option>
-              {branches.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name} ({b.code})
+              {unifiedBranches.map((u) => (
+                <option key={u.key} value={u.key}>
+                  {u.primary.name} ({u.codes.join('/') || u.primary.code})
                 </option>
               ))}
             </select>
@@ -553,7 +610,7 @@ export function RestockAnalyticsPanel({
                   e.target.value === 'all' ? 'all' : Number(e.target.value)
                 )
               }
-              className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-800 focus:border-[#1B8EE6] focus:outline-none"
+              className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-800 focus:border-[#0F172A] focus:outline-none"
             >
               <option value="all">Semua</option>
               {availableYears.map((y) => (
@@ -564,15 +621,35 @@ export function RestockAnalyticsPanel({
             </select>
           </div>
 
+          {/* Source Filter */}
+          <div className="lg:col-span-2">
+            <label className="mb-1 block text-[11px] font-semibold text-slate-500">
+              Sumber Data
+            </label>
+            <select
+              value={sourceFilter}
+              onChange={(e) =>
+                setSourceFilter(e.target.value as 'all' | 'import' | 'pos')
+              }
+              className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-800 focus:border-[#0F172A] focus:outline-none"
+            >
+              <option value="all">Semua Sumber</option>
+              <option value="import">
+                Impor Sheet ({sourceCounts.importLines})
+              </option>
+              <option value="pos">Kasir POS ({sourceCounts.posLines})</option>
+            </select>
+          </div>
+
           {/* Multi-Month Checkboxes (Jan–Des) */}
-          <div className="lg:col-span-6">
+          <div className="lg:col-span-5">
             <div className="mb-1 flex items-center justify-between text-[11px] font-semibold text-slate-500">
               <span>Filter Multi-Bulan</span>
               {selectedMonths.length > 0 && (
                 <button
                   type="button"
                   onClick={() => setSelectedMonths([])}
-                  className="font-semibold text-[#1B8EE6] hover:underline"
+                  className="font-semibold text-[#0F172A] hover:underline"
                 >
                   Tampilkan Semua Bulan
                 </button>
@@ -584,7 +661,7 @@ export function RestockAnalyticsPanel({
                 onClick={() => setSelectedMonths([])}
                 className={`h-8 rounded-md px-2.5 text-[11px] font-semibold transition-colors whitespace-nowrap ${
                   selectedMonths.length === 0
-                    ? 'bg-[#1B8EE6] text-white'
+                    ? 'bg-[#0F172A] text-white'
                     : 'border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
                 }`}
               >
@@ -599,7 +676,7 @@ export function RestockAnalyticsPanel({
                     onClick={() => toggleMonth(m.num)}
                     className={`h-8 rounded-md px-2 text-[11px] font-semibold transition-colors whitespace-nowrap ${
                       active
-                        ? 'bg-[#1B8EE6] text-white'
+                        ? 'bg-[#0F172A] text-white'
                         : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
                     }`}
                   >
@@ -616,23 +693,27 @@ export function RestockAnalyticsPanel({
       <div className="grid grid-cols-2 gap-3.5 lg:grid-cols-4">
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="text-xs font-medium text-slate-500">
-            Total Omset Bersih
+            Total Omset (Total Bayar Net)
           </div>
           <div className="font-mono-num mt-1.5 text-xl font-extrabold text-slate-900">
             {formatRupiah(analytics.totalRevenue)}
           </div>
-          {analytics.totalDiscount > 0 ? (
-            <div className="font-mono-num mt-1 text-[11px] text-slate-500">
-              Kotor {formatRupiah(analytics.totalGrossRevenue)} ·{' '}
-              <span className="font-semibold text-rose-600">
-                Diskon -{formatRupiah(analytics.totalDiscount)}
+          <div className="mt-1 text-[11px] text-slate-400">
+            {filteredDiscountTotal > 0 ? (
+              <span>
+                Subtotal Item{' '}
+                <span className="font-mono-num font-semibold text-slate-600">
+                  {formatRupiah(filteredGrossTotal)}
+                </span>{' '}
+                − Potongan{' '}
+                <span className="font-mono-num font-semibold text-rose-600">
+                  {formatRupiah(filteredDiscountTotal)}
+                </span>
               </span>
-            </div>
-          ) : (
-            <div className="mt-1 text-[11px] text-slate-400">
-              Nilai bersih penjualan setelah diskon
-            </div>
-          )}
+            ) : (
+              'Nilai bersih penjualan periode aktif'
+            )}
+          </div>
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -655,7 +736,11 @@ export function RestockAnalyticsPanel({
             {formatNumber(filteredTxCount)} trx
           </div>
           <div className="mt-1 text-[11px] text-slate-400">
-            POS kasir & rekapan impor
+            {sourceFilter === 'import'
+              ? 'Khusus data impor Google Sheet'
+              : sourceFilter === 'pos'
+                ? 'Khusus transaksi Kasir POS'
+                : 'POS kasir & rekapan impor'}
           </div>
         </div>
 
@@ -666,10 +751,31 @@ export function RestockAnalyticsPanel({
           <div className="font-mono-num mt-1.5 text-xl font-extrabold text-slate-900">
             {formatNumber(analytics.uniqueSkuCount)} SKU
           </div>
-          <div className="mt-1 text-[11px] text-rose-600 font-medium">
-            {analytics.urgentCount > 0
-              ? `${analytics.urgentCount} produk butuh restok segera`
-              : 'Semua produk unggulan aman'}
+          <div className="mt-1 text-[11px]">
+            {analytics.freeSkuCount > 0 ? (
+              <span className="text-slate-500">
+                <span className="font-mono-num font-semibold text-slate-700">
+                  {formatNumber(analytics.paidSkuCount)}
+                </span>{' '}
+                berbayar ·{' '}
+                <span className="font-mono-num font-semibold text-amber-600">
+                  {formatNumber(analytics.freeSkuCount)}
+                </span>{' '}
+                gratis
+                {analytics.urgentCount > 0 && (
+                  <span className="font-medium text-rose-600">
+                    {' '}
+                    · {analytics.urgentCount} restok
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span className="font-medium text-rose-600">
+                {analytics.urgentCount > 0
+                  ? `${analytics.urgentCount} produk butuh restok segera`
+                  : 'Semua produk unggulan aman'}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -719,8 +825,8 @@ export function RestockAnalyticsPanel({
                         <div className="font-semibold text-slate-900">
                           {row.name}
                         </div>
-                        <div className="font-mono-num text-[11px] text-slate-400">
-                          {row.sku} · {row.category}
+                        <div className="text-[11px] text-slate-400">
+                          {row.category}
                         </div>
                       </td>
                       <td className="font-mono-num px-2 py-2.5 text-right font-bold text-slate-900 whitespace-nowrap">
@@ -795,8 +901,8 @@ export function RestockAnalyticsPanel({
                         <div className="font-semibold text-slate-900">
                           {row.name}
                         </div>
-                        <div className="font-mono-num text-[11px] text-slate-400">
-                          {row.sku} · {row.category}
+                        <div className="text-[11px] text-slate-400">
+                          {row.category}
                         </div>
                       </td>
                       <td className="font-mono-num px-2 py-2.5 text-right font-bold text-emerald-700 whitespace-nowrap">
@@ -949,7 +1055,7 @@ export function RestockAnalyticsPanel({
                           type="button"
                           onClick={() => openQuickRestock(row.productId)}
                           disabled={!productById.has(row.productId)}
-                          className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-semibold text-slate-700 hover:border-[#1B8EE6] hover:text-[#1B8EE6] disabled:opacity-40"
+                          className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-semibold text-slate-700 hover:border-[#0F172A] hover:text-[#0F172A] disabled:opacity-40"
                         >
                           <PackagePlus className="h-3.5 w-3.5" />
                           <span>Restok</span>
@@ -998,7 +1104,7 @@ export function RestockAnalyticsPanel({
             onSubmit={handleSubmitQuickRestock}
             className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl"
           >
-            <div className="flex items-center justify-between bg-[#1B8EE6] px-5 py-3.5 text-white">
+            <div className="flex items-center justify-between bg-[#0F172A] px-5 py-3.5 text-white">
               <h3 className="text-sm font-bold">Restok Cepat Produk</h3>
               <button
                 type="button"
@@ -1027,7 +1133,7 @@ export function RestockAnalyticsPanel({
                   required
                   value={restockBranchId}
                   onChange={(e) => setRestockBranchId(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-900 focus:border-[#0F172A] focus:outline-none"
                 >
                   {branches.map((b) => (
                     <option key={b.id} value={b.id}>
@@ -1048,7 +1154,7 @@ export function RestockAnalyticsPanel({
                   max={100000}
                   value={restockQty}
                   onChange={(e) => setRestockQty(e.target.value)}
-                  className="font-mono-num h-10 w-full rounded-lg border border-slate-300 px-3 text-sm font-bold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                  className="font-mono-num h-10 w-full rounded-lg border border-slate-300 px-3 text-sm font-bold text-slate-900 focus:border-[#0F172A] focus:outline-none"
                 />
               </div>
 
@@ -1061,7 +1167,7 @@ export function RestockAnalyticsPanel({
                   maxLength={160}
                   value={restockNote}
                   onChange={(e) => setRestockNote(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                  className="h-10 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                 />
               </div>
             </div>

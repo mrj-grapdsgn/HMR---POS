@@ -1,4 +1,4 @@
-export type DiscountMode = 'none' | 'fixed' | 'percent' | 'exact' | 'voucher';
+export type DiscountMode = 'none' | 'fixed' | 'percent' | 'exact' | 'voucher' | 'b1g1';
 
 export type PaymentMethod = 'cash' | 'qris' | 'transfer';
 

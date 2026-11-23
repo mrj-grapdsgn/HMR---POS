@@ -119,6 +119,9 @@ export function ImportMigrationPanel({
   const [isDashboardOnly, setIsDashboardOnly] = useState(false);
 
   const [sourceLabel, setSourceLabel] = useState('');
+  const [discountImportMode, setDiscountImportMode] = useState<
+    'net_per_tx' | 'gross_only'
+  >('net_per_tx');
   const [showAllPreview, setShowAllPreview] = useState(false);
   const [previewFilter, setPreviewFilter] = useState<'tx' | 'catalog' | 'all'>(
     'all'
@@ -132,25 +135,75 @@ export function ImportMigrationPanel({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [resultMsg, setResultMsg] = useState<string | null>(null);
 
-  const previewRows = useMemo(() => {
+  const rawMergedRows = useMemo(() => {
     if (manualRows) return manualRows;
     if (parsedTabs.length === 0) return [];
     return mergeSelectedTabs(parsedTabs, selectedTabNames);
   }, [manualRows, parsedTabs, selectedTabNames]);
 
+  const hasRawDiscounts = useMemo(
+    () => rawMergedRows.some((r) => (r.discountAmount ?? 0) > 0),
+    [rawMergedRows]
+  );
+
+  const rawSalesItemCount = useMemo(() => {
+    const selectedSet = new Set(selectedTabNames);
+    const salesTabs = parsedTabs.filter(
+      (t) => selectedSet.has(t.sheetName) && t.kind === 'sales'
+    );
+    if (salesTabs.length > 0) {
+      return salesTabs.reduce((s, t) => s + t.rawRowCount, 0);
+    }
+    return rawMergedRows.filter((r) => (r.qtySold ?? 0) > 0).length;
+  }, [parsedTabs, selectedTabNames, rawMergedRows]);
+
+  const previewRows = useMemo(() => {
+    if (discountImportMode === 'net_per_tx') return rawMergedRows;
+    return rawMergedRows.map((r) => {
+      if ((r.qtySold ?? 0) <= 0) return r;
+      const gross =
+        r.grossSales !== undefined
+          ? r.grossSales
+          : r.totalSales !== undefined
+            ? r.totalSales + (r.discountAmount ?? 0)
+            : (r.qtySold ?? 0) * r.price;
+      return {
+        ...r,
+        grossSales: gross,
+        discountAmount: undefined,
+        discountType: undefined,
+        totalSales: gross,
+      };
+    });
+  }, [rawMergedRows, discountImportMode]);
+
   const previewStats = useMemo(() => {
     const skus = new Set(previewRows.map((r) => r.sku.toLowerCase()));
+    const soldSkus = new Set<string>();
     const txCodes = new Set<string>();
     const catalogStockByBranchSku = new Map<string, number>();
     const catalogStockBySku = new Map<string, number>();
+    const monthAgg = new Map<
+      string,
+      {
+        year: number;
+        month: number;
+        txSet: Set<string>;
+        skuSet: Set<string>;
+        qty: number;
+        grossOmset: number;
+        discount: number;
+        omset: number;
+      }
+    >();
     let txRowCount = 0;
     let catalogRowCount = 0;
     let totalCurrentStock = 0;
     let hasCatalogStock = false;
     let totalQtySold = 0;
-    let totalOmset = 0;
     let totalGrossOmset = 0;
     let totalDiscount = 0;
+    let totalOmset = 0;
     for (const r of previewRows) {
       if (r.hasStockData !== false) {
         hasCatalogStock = true;
@@ -168,28 +221,69 @@ export function ImportMigrationPanel({
         catalogRowCount += 1;
       }
       if ((r.qtySold ?? 0) > 0) {
-        totalQtySold += r.qtySold ?? 0;
-        const net =
-          r.totalSales !== undefined ? r.totalSales : (r.qtySold ?? 0) * r.price;
-        const gross =
-          r.grossSales !== undefined
-            ? Math.max(net, r.grossSales)
-            : r.discountAmount && r.discountAmount > 0
-              ? net + r.discountAmount
-              : net;
-        const disc = Math.max(0, gross - net);
-        totalOmset += net;
-        totalGrossOmset += gross;
-        totalDiscount += disc;
-        if (r.transactionCode?.trim()) {
-          txCodes.add(
-            `${normalizeBranchKey(r.branchName)}::${r.transactionCode.trim().toLowerCase()}`
-          );
+        soldSkus.add(r.sku.toLowerCase());
+        const lineQty = r.qtySold ?? 0;
+        const lineOmset =
+          r.totalSales !== undefined ? r.totalSales : lineQty * r.price;
+        const lineDiscount = r.discountAmount ?? 0;
+        const lineGross =
+          r.grossSales !== undefined ? r.grossSales : lineOmset + lineDiscount;
+        totalQtySold += lineQty;
+        totalGrossOmset += lineGross;
+        totalDiscount += lineDiscount;
+        totalOmset += lineOmset;
+
+        const bKey = normalizeBranchKey(r.branchName);
+        const txKey = r.transactionCode?.trim()
+          ? `${bKey}::${r.transactionCode.trim().toLowerCase()}`
+          : '';
+        if (txKey) {
+          txCodes.add(txKey);
         }
+
+        const yr = r.saleYear ?? defaultYear;
+        const mo = r.saleMonth ?? defaultMonth;
+        const mKey = `${yr}-${String(mo).padStart(2, '0')}`;
+        let bucket = monthAgg.get(mKey);
+        if (!bucket) {
+          bucket = {
+            year: yr,
+            month: mo,
+            txSet: new Set<string>(),
+            skuSet: new Set<string>(),
+            qty: 0,
+            grossOmset: 0,
+            discount: 0,
+            omset: 0,
+          };
+          monthAgg.set(mKey, bucket);
+        }
+        bucket.qty += lineQty;
+        bucket.grossOmset += lineGross;
+        bucket.discount += lineDiscount;
+        bucket.omset += lineOmset;
+        bucket.skuSet.add(r.sku.toLowerCase());
+        if (txKey) bucket.txSet.add(txKey);
       }
     }
+
+    const monthlyBreakdown = Array.from(monthAgg.values())
+      .sort((a, b) => a.year - b.year || a.month - b.month)
+      .map((b) => ({
+        year: b.year,
+        month: b.month,
+        label: `${MONTH_SHORT_MAP[b.month] ?? b.month} ${b.year}`,
+        txCount: b.txSet.size,
+        skuCount: b.skuSet.size,
+        qty: b.qty,
+        grossOmset: b.grossOmset,
+        discount: b.discount,
+        omset: b.omset,
+      }));
+
     return {
       uniqueSkus: skus.size,
+      uniqueSoldSkus: soldSkus.size,
       uniqueTxCount: txCodes.size,
       hasTxCodes: txCodes.size > 0,
       txRowCount,
@@ -199,11 +293,13 @@ export function ImportMigrationPanel({
       catalogStockByBranchSku,
       catalogStockBySku,
       totalQtySold,
-      totalOmset,
       totalGrossOmset,
       totalDiscount,
+      hasDiscounts: totalDiscount > 0,
+      totalOmset,
+      monthlyBreakdown,
     };
-  }, [previewRows]);
+  }, [previewRows, defaultYear, defaultMonth]);
 
   const filteredPreviewRows = useMemo(() => {
     if (!previewStats.hasTxCodes || previewFilter === 'all') {
@@ -246,6 +342,7 @@ export function ImportMigrationPanel({
     setXlsxDownloadUrl(parsed.xlsxDownloadUrl ?? null);
     setIsDashboardOnly(parsed.isDashboardSummaryOnly);
     setSourceLabel(label);
+    setDiscountImportMode('net_per_tx');
     setShowAllPreview(false);
     setPreviewFilter(
       parsed.tabs.some((t) => t.selectedByDefault && t.uniqueTxCount > 0)
@@ -566,7 +663,7 @@ export function ImportMigrationPanel({
                 value={defaultBranch}
                 onChange={(e) => setDefaultBranch(e.target.value)}
                 placeholder="CFD Senayan"
-                className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
               />
             </div>
             <div>
@@ -576,7 +673,7 @@ export function ImportMigrationPanel({
               <select
                 value={defaultMonth}
                 onChange={(e) => setDefaultMonth(Number(e.target.value))}
-                className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-800 focus:border-[#1B8EE6] focus:outline-none"
+                className="h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-800 focus:border-[#0F172A] focus:outline-none"
               >
                 {MONTH_OPTIONS.map((m) => (
                   <option key={m.num} value={m.num}>
@@ -597,7 +694,7 @@ export function ImportMigrationPanel({
                 onChange={(e) =>
                   setDefaultYear(parseInt(e.target.value || '2026', 10) || 2026)
                 }
-                className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
               />
             </div>
           </div>
@@ -615,7 +712,7 @@ export function ImportMigrationPanel({
               type="button"
               disabled={parsing || saving}
               onClick={() => fileInputRef.current?.click()}
-              className="flex h-10 items-center gap-2 rounded-lg bg-[#1B8EE6] px-4 text-xs font-bold text-white hover:bg-[#1479C9] disabled:bg-slate-300 whitespace-nowrap"
+              className="flex h-10 items-center gap-2 rounded-lg bg-[#0F172A] px-4 text-xs font-bold text-white hover:bg-[#1E293B] disabled:bg-slate-300 whitespace-nowrap"
             >
               {parsing ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -649,7 +746,7 @@ export function ImportMigrationPanel({
           className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6"
         >
           <h3 className="flex items-center gap-1.5 text-sm font-bold text-slate-900">
-            <Link2 className="h-4 w-4 text-[#1B8EE6]" />
+            <Link2 className="h-4 w-4 text-[#0F172A]" />
             <span>Sinkronisasi dari Link Google Sheet</span>
           </h3>
           <p className="text-xs text-slate-500">
@@ -664,7 +761,7 @@ export function ImportMigrationPanel({
             value={sheetUrl}
             onChange={(e) => handleSheetUrlChange(e.target.value)}
             placeholder="https://docs.google.com/spreadsheets/d/..."
-            className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+            className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
           />
 
           {/* Mode Selector */}
@@ -678,7 +775,7 @@ export function ImportMigrationPanel({
                 onClick={() => setSyncMode('dual_stok_penjualan')}
                 className={`rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition-colors ${
                   syncMode === 'dual_stok_penjualan'
-                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    ? 'border-[#0F172A] bg-slate-50 text-[#0F172A]'
                     : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
                 }`}
               >
@@ -693,7 +790,7 @@ export function ImportMigrationPanel({
                 onClick={() => setSyncMode('data_penjualan')}
                 className={`rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition-colors ${
                   syncMode === 'data_penjualan'
-                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    ? 'border-[#0F172A] bg-slate-50 text-[#0F172A]'
                     : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
                 }`}
               >
@@ -708,7 +805,7 @@ export function ImportMigrationPanel({
                 onClick={() => setSyncMode('monitoring_stok')}
                 className={`rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition-colors ${
                   syncMode === 'monitoring_stok'
-                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    ? 'border-[#0F172A] bg-slate-50 text-[#0F172A]'
                     : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
                 }`}
               >
@@ -723,7 +820,7 @@ export function ImportMigrationPanel({
                 onClick={() => setSyncMode('custom')}
                 className={`rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition-colors ${
                   syncMode === 'custom'
-                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    ? 'border-[#0F172A] bg-slate-50 text-[#0F172A]'
                     : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
                 }`}
               >
@@ -741,7 +838,7 @@ export function ImportMigrationPanel({
               value={customTabName}
               onChange={(e) => setCustomTabName(e.target.value)}
               placeholder="Kosongkan untuk coba semua tab, atau ketik nama tab..."
-              className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+              className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
             />
           )}
 
@@ -772,7 +869,7 @@ export function ImportMigrationPanel({
                 href={directXlsxFromInput}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex h-9 items-center justify-center gap-1.5 rounded-lg border border-[#1B8EE6] bg-sky-50 px-3 text-xs font-bold text-[#1B8EE6] hover:bg-sky-100 whitespace-nowrap"
+                className="flex h-9 items-center justify-center gap-1.5 rounded-lg border border-[#0F172A] bg-slate-50 px-3 text-xs font-bold text-[#0F172A] hover:bg-slate-100 whitespace-nowrap"
               >
                 <Download className="h-3.5 w-3.5" />
                 <span>Unduh .xlsx</span>
@@ -841,19 +938,19 @@ export function ImportMigrationPanel({
 
       {/* Live Save / Cleanup Progress Banner */}
       {(saving || clearingImported) && progress && (
-        <div className="space-y-2 rounded-xl border border-sky-200 bg-sky-50 p-4">
+        <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
           <div className="flex items-center justify-between text-xs font-bold text-sky-900">
             <span className="flex items-center gap-2">
-              <Loader2 className="h-4 w-4 animate-spin text-[#1B8EE6]" />
+              <Loader2 className="h-4 w-4 animate-spin text-[#0F172A]" />
               {progress.stage}
             </span>
             <span className="font-mono-num">
               {progress.current} / {progress.total}
             </span>
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-sky-200">
+          <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
             <div
-              className="h-full bg-[#1B8EE6] transition-all duration-200"
+              className="h-full bg-[#0F172A] transition-all duration-200"
               style={{
                 width: `${
                   progress.total > 0
@@ -919,7 +1016,7 @@ export function ImportMigrationPanel({
         <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
-              <Layers className="h-4 w-4 text-[#1B8EE6]" />
+              <Layers className="h-4 w-4 text-[#0F172A]" />
               <span>
                 Tab & Pemetaan Kolom Terdeteksi ({parsedTabs.length} tab)
               </span>
@@ -947,10 +1044,14 @@ export function ImportMigrationPanel({
                 ['Harga', cols.price],
                 ['Stok', cols.currentStock],
                 ['Qty', cols.qtySold],
-                ['Total', cols.totalSales],
                 ['Tipe Diskon', cols.discountType],
-                ['Diskon', cols.discountValue],
-                ['Total Akhir', cols.netTotal],
+                ['Voucher', cols.voucher],
+                [
+                  tab.kind === 'sales' ? 'Diskon (1×/TRX)' : 'Diskon',
+                  cols.discount,
+                ],
+                ['Total', cols.totalSales],
+                ['Total Bayar (Net)', cols.netPay],
                 ['Tanggal', cols.date],
               ].filter((entry): entry is [string, string] => Boolean(entry[1]));
 
@@ -959,7 +1060,7 @@ export function ImportMigrationPanel({
                   key={tab.sheetName}
                   className={`rounded-lg border p-2.5 text-xs transition-colors ${
                     checked
-                      ? 'border-[#1B8EE6] bg-sky-50/70 text-slate-900'
+                      ? 'border-[#0F172A] bg-slate-50/70 text-slate-900'
                       : 'border-slate-200 bg-slate-50 text-slate-600'
                   }`}
                 >
@@ -968,7 +1069,7 @@ export function ImportMigrationPanel({
                       type="checkbox"
                       checked={checked}
                       onChange={() => toggleTabSelection(tab.sheetName)}
-                      className="h-3.5 w-3.5 accent-[#1B8EE6]"
+                      className="h-3.5 w-3.5 accent-[#0F172A]"
                     />
                     <span className="font-bold">{tab.sheetName}</span>
                     <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
@@ -1014,21 +1115,11 @@ export function ImportMigrationPanel({
                   ? ` · ${previewStats.uniqueTxCount} trx`
                   : ''}
                 {' · '}
-                {formatNumber(previewStats.totalQtySold)} pcs terjual ·{' '}
-                {previewStats.totalDiscount > 0 ? (
-                  <>
-                    Kotor {formatRupiah(previewStats.totalGrossOmset)} ·{' '}
-                    <span className="text-rose-600">
-                      Diskon -{formatRupiah(previewStats.totalDiscount)}
-                    </span>{' '}
-                    ·{' '}
-                    <span className="text-emerald-700">
-                      Omset Bersih {formatRupiah(previewStats.totalOmset)}
-                    </span>
-                  </>
-                ) : (
-                  formatRupiah(previewStats.totalOmset)
-                )}{' '}
+                {formatNumber(previewStats.totalQtySold)} pcs terjual · Omset
+                Bersih {formatRupiah(previewStats.totalOmset)}
+                {previewStats.hasDiscounts
+                  ? ` (Kotor ${formatRupiah(previewStats.totalGrossOmset)} − Diskon ${formatRupiah(previewStats.totalDiscount)})`
+                  : ''}{' '}
                 · {sourceLabel})
               </div>
               <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-600">
@@ -1036,7 +1127,7 @@ export function ImportMigrationPanel({
                   type="checkbox"
                   checked={includeSales}
                   onChange={(e) => setIncludeSales(e.target.checked)}
-                  className="h-3.5 w-3.5 accent-[#1B8EE6]"
+                  className="h-3.5 w-3.5 accent-[#0F172A]"
                 />
                 <span>
                   Sinkronkan data penjualan (TRX, Qty Terjual & Omset) ke Dasbor
@@ -1051,7 +1142,7 @@ export function ImportMigrationPanel({
                     onChange={(e) =>
                       setReplacePreviousImportedSales(e.target.checked)
                     }
-                    className="h-3.5 w-3.5 accent-[#1B8EE6]"
+                    className="h-3.5 w-3.5 accent-[#0F172A]"
                   />
                   <span>
                     Ganti data penjualan impor lama (perbaiki jumlah TRX &
@@ -1089,6 +1180,134 @@ export function ImportMigrationPanel({
             </div>
           </div>
 
+          {/* 4-KPI Audit Bar & Discount Calculation Mode Toggle */}
+          {previewStats.totalQtySold > 0 && (
+            <div className="space-y-2.5 border-b border-slate-200 bg-white px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] font-bold text-slate-800">
+                  Audit Total Penjualan Sebelum Disimpan ke Firebase
+                </div>
+                {hasRawDiscounts && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <span className="font-semibold text-slate-500">
+                      Mode Diskon:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setDiscountImportMode('net_per_tx')}
+                      className={`rounded-md px-2.5 py-1 font-bold transition-colors ${
+                        discountImportMode === 'net_per_tx'
+                          ? 'bg-emerald-600 text-white'
+                          : 'border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      Potong Diskon 1×/TRX (Direkomendasikan)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDiscountImportMode('gross_only')}
+                      className={`rounded-md px-2.5 py-1 font-bold transition-colors ${
+                        discountImportMode === 'gross_only'
+                          ? 'bg-slate-900 text-white'
+                          : 'border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      Total Penjualan Kotor Saja
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2">
+                  <div className="text-[11px] font-medium text-slate-500">
+                    {previewStats.hasDiscounts
+                      ? 'Total Omset Bersih'
+                      : 'Total Omset Penjualan'}
+                  </div>
+                  <div className="font-mono-num mt-0.5 text-sm font-extrabold text-emerald-700">
+                    {formatRupiah(previewStats.totalOmset)}
+                  </div>
+                  <div className="font-mono-num mt-0.5 text-[10px] text-slate-500">
+                    {previewStats.hasDiscounts
+                      ? `Kotor ${formatRupiah(previewStats.totalGrossOmset)} − Diskon 1×/TRX ${formatRupiah(previewStats.totalDiscount)}`
+                      : `Kotor Total Penjualan: ${formatRupiah(previewStats.totalGrossOmset)}`}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2">
+                  <div className="text-[11px] font-medium text-slate-500">
+                    Total Kuantitas Terjual
+                  </div>
+                  <div className="font-mono-num mt-0.5 text-sm font-extrabold text-slate-900">
+                    {formatNumber(previewStats.totalQtySold)} pcs
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-slate-500">
+                    Akumulasi qty dari sheet penjualan
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2">
+                  <div className="text-[11px] font-medium text-slate-500">
+                    Total Transaksi Unik
+                  </div>
+                  <div className="font-mono-num mt-0.5 text-sm font-extrabold text-slate-900">
+                    {formatNumber(previewStats.uniqueTxCount)} transaksi
+                  </div>
+                  <div className="font-mono-num mt-0.5 text-[10px] text-slate-500">
+                    {formatNumber(rawSalesItemCount)} baris item asli
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2">
+                  <div className="text-[11px] font-medium text-slate-500">
+                    Total SKU Terjual
+                  </div>
+                  <div className="font-mono-num mt-0.5 text-sm font-extrabold text-slate-900">
+                    {formatNumber(previewStats.uniqueSoldSkus)} produk
+                  </div>
+                  <div className="font-mono-num mt-0.5 text-[10px] text-slate-500">
+                    Dari {formatNumber(previewStats.uniqueSkus)} total SKU katalog
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {previewStats.monthlyBreakdown.length > 0 && (
+            <div className="border-b border-slate-200 bg-slate-50/50 px-4 py-2.5">
+              <div className="mb-1.5 text-[11px] font-bold text-slate-700">
+                Ringkasan Penjualan Per Bulan (Verifikasi vs Laporan Sheet):
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                {previewStats.monthlyBreakdown.map((m) => (
+                  <div
+                    key={m.label}
+                    className="rounded-lg border border-slate-200/80 bg-white px-3 py-2 text-[11px]"
+                  >
+                    <div className="flex items-center justify-between font-bold text-slate-900">
+                      <span>{m.label}</span>
+                      <span className="font-mono-num text-emerald-700">
+                        {formatRupiah(m.omset)}
+                      </span>
+                    </div>
+                    <div className="font-mono-num mt-0.5 text-slate-600">
+                      {formatNumber(m.qty)} pcs ·{' '}
+                      {m.txCount > 0 ? `${formatNumber(m.txCount)} trx · ` : ''}
+                      {formatNumber(m.skuCount)} SKU
+                    </div>
+                    {m.discount > 0 && (
+                      <div className="font-mono-num mt-0.5 text-[10px] text-slate-400">
+                        Kotor {formatRupiah(m.grossOmset)} − Diskon{' '}
+                        {formatRupiah(m.discount)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {previewStats.hasTxCodes && previewStats.catalogRowCount > 0 && (
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-2 text-xs">
               <div className="flex flex-wrap items-center gap-1.5">
@@ -1100,7 +1319,7 @@ export function ImportMigrationPanel({
                   }}
                   className={`rounded-lg px-3 py-1 font-bold transition-colors ${
                     previewFilter === 'tx'
-                      ? 'bg-[#1B8EE6] text-white'
+                      ? 'bg-[#0F172A] text-white'
                       : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
                 >
@@ -1115,7 +1334,7 @@ export function ImportMigrationPanel({
                   }}
                   className={`rounded-lg px-3 py-1 font-bold transition-colors ${
                     previewFilter === 'catalog'
-                      ? 'bg-[#1B8EE6] text-white'
+                      ? 'bg-[#0F172A] text-white'
                       : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
                 >
@@ -1129,7 +1348,7 @@ export function ImportMigrationPanel({
                   }}
                   className={`rounded-lg px-3 py-1 font-bold transition-colors ${
                     previewFilter === 'all'
-                      ? 'bg-[#1B8EE6] text-white'
+                      ? 'bg-[#0F172A] text-white'
                       : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
                 >
@@ -1166,16 +1385,18 @@ export function ImportMigrationPanel({
                   <th className="px-3 py-2 text-right font-semibold">
                     Terjual
                   </th>
-                  {previewStats.totalDiscount > 0 &&
-                    previewFilter !== 'catalog' && (
+                  {previewStats.hasDiscounts && previewFilter !== 'catalog' && (
+                    <>
                       <th className="px-3 py-2 text-right font-semibold">
-                        Diskon
+                        Total Kotor
                       </th>
-                    )}
+                      <th className="px-3 py-2 text-right font-semibold">
+                        Diskon (Proporsi)
+                      </th>
+                    </>
+                  )}
                   <th className="px-3 py-2 text-right font-semibold">
-                    {previewStats.totalDiscount > 0
-                      ? 'Total Bersih'
-                      : 'Total Penjualan'}
+                    {previewStats.hasDiscounts ? 'Omset Bersih' : 'Total Penjualan'}
                   </th>
                 </tr>
               </thead>
@@ -1242,17 +1463,25 @@ export function ImportMigrationPanel({
                       <td className="font-mono-num px-3 py-2 text-right text-slate-700 whitespace-nowrap">
                         {row.qtySold ? `${row.qtySold} pcs` : '—'}
                       </td>
-                      {previewStats.totalDiscount > 0 &&
+                      {previewStats.hasDiscounts &&
                         previewFilter !== 'catalog' && (
-                          <td className="font-mono-num px-3 py-2 text-right whitespace-nowrap">
-                            {(row.discountAmount ?? 0) > 0 ? (
-                              <span className="font-semibold text-rose-600">
-                                -{formatRupiah(row.discountAmount ?? 0)}
-                              </span>
-                            ) : (
-                              <span className="text-slate-400">—</span>
-                            )}
-                          </td>
+                          <>
+                            <td className="font-mono-num px-3 py-2 text-right text-slate-600 whitespace-nowrap">
+                              {row.qtySold
+                                ? formatRupiah(
+                                    row.grossSales !== undefined
+                                      ? row.grossSales
+                                      : (row.totalSales ?? row.qtySold * row.price) +
+                                          (row.discountAmount ?? 0)
+                                  )
+                                : '—'}
+                            </td>
+                            <td className="font-mono-num px-3 py-2 text-right text-rose-600 whitespace-nowrap">
+                              {row.discountAmount && row.discountAmount > 0
+                                ? `−${formatRupiah(row.discountAmount)}`
+                                : '—'}
+                            </td>
+                          </>
                         )}
                       <td className="font-mono-num px-3 py-2 text-right font-semibold text-emerald-700 whitespace-nowrap">
                         {row.qtySold
@@ -1275,7 +1504,7 @@ export function ImportMigrationPanel({
               <button
                 type="button"
                 onClick={() => setShowAllPreview(true)}
-                className="text-xs font-bold text-[#1B8EE6] hover:underline"
+                className="text-xs font-bold text-[#0F172A] hover:underline"
               >
                 Tampilkan semua {filteredPreviewRows.length} baris (sedang
                 menampilkan 100 baris pertama)

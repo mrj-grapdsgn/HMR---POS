@@ -280,14 +280,14 @@ export function InventoryBranchPanel({
         >
           <div className="flex items-center justify-between">
             <h2 className="flex items-center gap-1.5 text-sm font-bold text-slate-900">
-              <Building2 className="h-4 w-4 text-[#1B8EE6]" />
+              <Building2 className="h-4 w-4 text-[#0F172A]" />
               <span>{branchEditId ? 'Edit Cabang' : 'Tambah Cabang Baru'}</span>
             </h2>
             {branchEditId && (
               <button
                 type="button"
                 onClick={resetBranchForm}
-                className="text-xs font-semibold text-[#1B8EE6] hover:underline"
+                className="text-xs font-semibold text-[#0F172A] hover:underline"
               >
                 Batal
               </button>
@@ -305,7 +305,7 @@ export function InventoryBranchPanel({
               value={branchName}
               onChange={(e) => setBranchName(e.target.value)}
               placeholder="Contoh: CFD Senayan / Store Bekasi"
-              className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+              className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
             />
           </div>
 
@@ -320,7 +320,7 @@ export function InventoryBranchPanel({
                 value={branchCode}
                 onChange={(e) => setBranchCode(e.target.value.toUpperCase())}
                 placeholder="CFD-SENAYAN"
-                className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs uppercase text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs uppercase text-slate-900 focus:border-[#0F172A] focus:outline-none"
               />
             </div>
             <div className="flex items-end pb-2">
@@ -329,7 +329,7 @@ export function InventoryBranchPanel({
                   type="checkbox"
                   checked={branchActive}
                   onChange={(e) => setBranchActive(e.target.checked)}
-                  className="h-4 w-4 accent-[#1B8EE6]"
+                  className="h-4 w-4 accent-[#0F172A]"
                 />
                 <span>Cabang Aktif</span>
               </label>
@@ -346,14 +346,14 @@ export function InventoryBranchPanel({
               value={branchAddress}
               onChange={(e) => setBranchAddress(e.target.value)}
               placeholder="Opsional"
-              className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+              className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
             />
           </div>
 
           <button
             type="submit"
             disabled={branchSaving}
-            className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-[#1B8EE6] text-xs font-bold text-white hover:bg-[#1479C9] disabled:bg-slate-300"
+            className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-[#0F172A] text-xs font-bold text-white hover:bg-[#1E293B] disabled:bg-slate-300"
           >
             <Plus className="h-4 w-4" />
             <span>
@@ -408,7 +408,7 @@ export function InventoryBranchPanel({
                           {b.active ? 'Aktif' : 'Nonaktif'}
                         </span>
                         {isPosActive && (
-                          <span className="ml-2 text-[11px] font-bold text-[#1B8EE6]">
+                          <span className="ml-2 text-[11px] font-bold text-[#0F172A]">
                             · Aktif di POS
                           </span>
                         )}
@@ -422,7 +422,7 @@ export function InventoryBranchPanel({
                               onSelectActiveBranch(b.id);
                               onNotify(`Cabang aktif POS diubah ke ${b.name}`);
                             }}
-                            className="h-7 rounded-md border border-slate-300 px-2 text-[11px] font-semibold text-slate-700 hover:border-[#1B8EE6] hover:text-[#1B8EE6]"
+                            className="h-7 rounded-md border border-slate-300 px-2 text-[11px] font-semibold text-slate-700 hover:border-[#0F172A] hover:text-[#0F172A]"
                           >
                             Pilih di POS
                           </button>
@@ -474,7 +474,7 @@ export function InventoryBranchPanel({
             <select
               value={selectedBranch?.id ?? ''}
               onChange={(e) => setViewBranchId(e.target.value)}
-              className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-bold text-[#1B8EE6] focus:border-[#1B8EE6] focus:outline-none"
+              className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-bold text-[#0F172A] focus:border-[#0F172A] focus:outline-none"
             >
               {branches.map((b) => (
                 <option key={b.id} value={b.id}>
@@ -488,7 +488,7 @@ export function InventoryBranchPanel({
                 {formatNumber(summary.totalUnits)} pcs
               </strong>{' '}
               · Total Terjual:{' '}
-              <strong className="font-mono-num text-[#1B8EE6]">
+              <strong className="font-mono-num text-[#0F172A]">
                 {formatNumber(summary.totalSoldUnits)} pcs
               </strong>{' '}
               ·{' '}
@@ -533,7 +533,7 @@ export function InventoryBranchPanel({
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Cari produk / SKU..."
-                className="h-8 w-48 rounded-lg border border-slate-300 pr-2.5 pl-8 text-xs focus:border-[#1B8EE6] focus:outline-none"
+                className="h-8 w-48 rounded-lg border border-slate-300 pr-2.5 pl-8 text-xs focus:border-[#0F172A] focus:outline-none"
               />
             </div>
           </div>
@@ -615,7 +615,7 @@ export function InventoryBranchPanel({
                         <td
                           className={`font-mono-num px-3 py-2.5 text-right whitespace-nowrap ${
                             soldQty > 0
-                              ? 'font-semibold text-[#1B8EE6]'
+                              ? 'font-semibold text-[#0F172A]'
                               : 'text-slate-400'
                           }`}
                         >
@@ -749,7 +749,7 @@ export function InventoryBranchPanel({
             onSubmit={handleStockModalSubmit}
             className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl"
           >
-            <div className="flex items-center justify-between bg-[#1B8EE6] px-5 py-3.5 text-white">
+            <div className="flex items-center justify-between bg-[#0F172A] px-5 py-3.5 text-white">
               <h3 className="text-sm font-bold">
                 {modalMode === 'restock'
                   ? `Restok Masuk — ${selectedBranch.name}`
@@ -792,7 +792,7 @@ export function InventoryBranchPanel({
                   max={1000000}
                   value={modalQty}
                   onChange={(e) => setModalQty(e.target.value)}
-                  className="font-mono-num h-10 w-full rounded-lg border border-slate-300 px-3 text-sm font-bold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                  className="font-mono-num h-10 w-full rounded-lg border border-slate-300 px-3 text-sm font-bold text-slate-900 focus:border-[#0F172A] focus:outline-none"
                 />
               </div>
 
@@ -808,7 +808,7 @@ export function InventoryBranchPanel({
                       max={1000000}
                       value={modalInitial}
                       onChange={(e) => setModalInitial(e.target.value)}
-                      className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                      className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                     />
                   </div>
                   <div>
@@ -821,7 +821,7 @@ export function InventoryBranchPanel({
                       max={100000}
                       value={modalThreshold}
                       onChange={(e) => setModalThreshold(e.target.value)}
-                      className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                      className="font-mono-num h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                     />
                   </div>
                 </div>
@@ -836,7 +836,7 @@ export function InventoryBranchPanel({
                   maxLength={160}
                   value={modalNote}
                   onChange={(e) => setModalNote(e.target.value)}
-                  className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+                  className="h-9 w-full rounded-lg border border-slate-300 px-3 text-xs text-slate-900 focus:border-[#0F172A] focus:outline-none"
                 />
               </div>
             </div>

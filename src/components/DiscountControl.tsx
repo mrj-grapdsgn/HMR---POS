@@ -20,6 +20,7 @@ const DISCOUNT_OPTIONS: { value: DiscountMode; label: string }[] = [
   { value: 'percent', label: 'Diskon Persen (%)' },
   { value: 'exact', label: 'Harga Pas (Ubah Total)' },
   { value: 'voucher', label: 'Kode Voucher' },
+  { value: 'b1g1', label: 'Promo Buy 1 Get 1 Free (B1G1)' },
 ];
 
 export function DiscountControl({
@@ -45,7 +46,7 @@ export function DiscountControl({
         htmlFor="discount-mode-select"
         className="mb-2 flex items-center gap-1.5 text-xs font-bold tracking-wide text-slate-600"
       >
-        <Tag className="h-3.5 w-3.5 text-[#1B8EE6]" />
+        <Tag className="h-3.5 w-3.5 text-[#0F172A]" />
         <span>TERAPKAN DISKON / HARGA PAS</span>
       </label>
 
@@ -55,7 +56,7 @@ export function DiscountControl({
           id="discount-mode-select"
           value={discount.mode}
           onChange={(e) => handleModeChange(e.target.value as DiscountMode)}
-          className="h-11 w-full appearance-none rounded-lg border-2 border-[#1B8EE6]/60 bg-white pr-10 pl-3.5 text-sm font-semibold text-slate-900 transition-colors focus:border-[#1B8EE6] focus:outline-none focus:ring-2 focus:ring-sky-100"
+          className="h-11 w-full appearance-none rounded-lg border-2 border-[#0F172A]/60 bg-white pr-10 pl-3.5 text-sm font-semibold text-slate-900 transition-colors focus:border-[#0F172A] focus:outline-none focus:ring-2 focus:ring-slate-100"
         >
           {DISCOUNT_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -84,7 +85,7 @@ export function DiscountControl({
                 })
               }
               placeholder="Masukkan nominal potongan..."
-              className="font-mono-num h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm font-bold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+              className="font-mono-num h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm font-bold text-slate-900 focus:border-[#0F172A] focus:outline-none"
             />
           </div>
           <div className="grid grid-cols-4 gap-1.5">
@@ -95,7 +96,7 @@ export function DiscountControl({
                 onClick={() => onChange({ ...discount, fixedAmount: val })}
                 className={`rounded-md border py-1.5 text-xs font-semibold tabular-nums transition-colors ${
                   discount.fixedAmount === val
-                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    ? 'border-[#0F172A] bg-slate-50 text-[#0F172A]'
                     : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
                 }`}
               >
@@ -123,7 +124,7 @@ export function DiscountControl({
                 onChange({ ...discount, percentValue: v });
               }}
               placeholder="Masukkan persentase (0 - 100)"
-              className="font-mono-num h-10 w-full rounded-lg border border-slate-300 bg-white pr-9 pl-3 text-sm font-bold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+              className="font-mono-num h-10 w-full rounded-lg border border-slate-300 bg-white pr-9 pl-3 text-sm font-bold text-slate-900 focus:border-[#0F172A] focus:outline-none"
             />
             <span className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs font-bold text-slate-500">
               %
@@ -137,7 +138,7 @@ export function DiscountControl({
                 onClick={() => onChange({ ...discount, percentValue: pct })}
                 className={`rounded-md border py-1.5 text-xs font-semibold tabular-nums transition-colors ${
                   discount.percentValue === pct
-                    ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                    ? 'border-[#0F172A] bg-slate-50 text-[#0F172A]'
                     : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
                 }`}
               >
@@ -168,7 +169,7 @@ export function DiscountControl({
                 });
               }}
               placeholder="Masukkan total akhir yang diinginkan..."
-              className="font-mono-num h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm font-bold text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+              className="font-mono-num h-10 w-full rounded-lg border border-slate-300 bg-white pr-3 pl-9 text-sm font-bold text-slate-900 focus:border-[#0F172A] focus:outline-none"
             />
           </div>
           {totals.subtotal > 0 && discount.exactTotal !== null && (
@@ -201,7 +202,7 @@ export function DiscountControl({
               })
             }
             placeholder="Ketik kode voucher (mis. HEMAT10)"
-            className="font-mono-num h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold uppercase text-slate-900 focus:border-[#1B8EE6] focus:outline-none"
+            className="font-mono-num h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold uppercase text-slate-900 focus:border-[#0F172A] focus:outline-none"
           />
 
           {/* Quick clickable voucher presets */}
@@ -216,7 +217,7 @@ export function DiscountControl({
                   onClick={() => onChange({ ...discount, voucherCode: v.code })}
                   className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                     active
-                      ? 'border-[#1B8EE6] bg-sky-50 text-[#1B8EE6]'
+                      ? 'border-[#0F172A] bg-slate-50 text-[#0F172A]'
                       : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
                   }`}
                 >
@@ -242,6 +243,18 @@ export function DiscountControl({
               <span>{totals.voucherError}</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Mode 6: Buy 1 Get 1 Free */}
+      {discount.mode === 'b1g1' && (
+        <div className="mt-3 space-y-2">
+          <div className="flex items-start gap-2 rounded-lg bg-slate-100 p-2.5 text-xs text-slate-700">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#0F172A]" />
+            <span>
+              <strong>Promo Buy 1 Get 1 Free Aktif:</strong> Untuk setiap 2 item dalam keranjang, pelanggan hanya membayar produk dengan harga tertinggi (produk termurah digratiskan).
+            </span>
+          </div>
         </div>
       )}
     </div>
