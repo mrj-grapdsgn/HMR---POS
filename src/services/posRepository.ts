@@ -1006,6 +1006,182 @@ export async function deleteProductFromFirestore(
   }
 }
 
+export interface BulkPriceStockUpdateItem {
+  product: Product;
+  newPrice?: number;
+  newStock?: number;
+}
+
+export async function bulkUpdateProductPriceAndStock(
+  ownerId: string,
+  params: {
+    branchId: string;
+    branchName: string;
+    existingStocks: BranchStock[];
+    items: BulkPriceStockUpdateItem[];
+    actorName: string;
+    note?: string;
+  }
+): Promise<{
+  updatedPrices: number;
+  updatedStocks: number;
+  totalTouchedProducts: number;
+}> {
+  if (!ID_PATTERN.test(ownerId) || params.items.length === 0) {
+    return { updatedPrices: 0, updatedStocks: 0, totalTouchedProducts: 0 };
+  }
+
+  const stockMap = new Map<string, BranchStock>();
+  if (params.branchId) {
+    for (const st of params.existingStocks) {
+      if (st.branchId === params.branchId) {
+        stockMap.set(st.productId, st);
+      }
+    }
+  }
+
+  const safeBranchName =
+    params.branchName.trim().slice(0, BRANCH_NAME_MAX) || 'Cabang';
+  const safeActorName =
+    params.actorName.trim().slice(0, DISPLAY_NAME_MAX) || 'Admin';
+  const safeBaseNote = (
+    params.note?.trim() || 'Edit massal harga & stok'
+  ).slice(0, NOTE_MAX);
+
+  let updatedPrices = 0;
+  let updatedStocks = 0;
+  let totalTouchedProducts = 0;
+
+  let batch = writeBatch(db);
+  let opsInBatch = 0;
+  let newStockCreatesInBatch = 0;
+
+  const flushBatch = async () => {
+    if (opsInBatch === 0) return;
+    await batch.commit();
+    batch = writeBatch(db);
+    opsInBatch = 0;
+    newStockCreatesInBatch = 0;
+  };
+
+  try {
+    let logSeq = 0;
+    const baseTs = Date.now();
+
+    for (const item of params.items) {
+      const priceChanged =
+        item.newPrice !== undefined &&
+        Math.min(1000000000, Math.max(0, Math.round(item.newPrice))) !==
+          item.product.price;
+
+      const existingStock = params.branchId
+        ? stockMap.get(item.product.id)
+        : undefined;
+      const prevStock = existingStock?.currentStock ?? 0;
+      const cleanNextStock =
+        item.newStock !== undefined
+          ? Math.min(1000000, Math.max(0, Math.round(item.newStock)))
+          : undefined;
+      const stockChanged =
+        Boolean(params.branchId) &&
+        cleanNextStock !== undefined &&
+        cleanNextStock !== prevStock;
+
+      if (!priceChanged && !stockChanged) continue;
+
+      const neededOps = (priceChanged ? 1 : 0) + (stockChanged ? 2 : 0);
+      const neededNewStockCreates = stockChanged && !existingStock ? 1 : 0;
+
+      // Keep well within Firestore 500-write batch limit AND 20-getAfter/existsAfter rules limit
+      if (
+        opsInBatch + neededOps > 380 ||
+        newStockCreatesInBatch + neededNewStockCreates > 6
+      ) {
+        await flushBatch();
+      }
+
+      if (priceChanged && item.newPrice !== undefined) {
+        const safePrice = Math.min(
+          1000000000,
+          Math.max(0, Math.round(item.newPrice))
+        );
+        batch.update(doc(db, 'products', item.product.id), {
+          price: safePrice,
+          updatedAt: serverTimestamp(),
+        });
+        opsInBatch += 1;
+        updatedPrices += 1;
+      }
+
+      if (stockChanged && cleanNextStock !== undefined && params.branchId) {
+        if (existingStock) {
+          batch.update(doc(db, 'branchStocks', existingStock.id), {
+            initialStock: Math.min(
+              1000000,
+              Math.max(0, Math.round(existingStock.initialStock), cleanNextStock)
+            ),
+            currentStock: cleanNextStock,
+            minThreshold: Math.min(
+              100000,
+              Math.max(0, Math.round(existingStock.minThreshold))
+            ),
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          const stockDocId = makeBranchStockDocId(
+            params.branchId,
+            item.product.id
+          );
+          batch.set(doc(db, 'branchStocks', stockDocId), {
+            ownerId,
+            branchId: params.branchId,
+            productId: item.product.id,
+            initialStock: cleanNextStock,
+            currentStock: cleanNextStock,
+            minThreshold: 2,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          newStockCreatesInBatch += 1;
+        }
+
+        const logId = sanitizeId(
+          `log-${baseTs}-${logSeq++}-${Math.random().toString(36).slice(2, 5)}`,
+          'log'
+        );
+        batch.set(doc(db, 'stockLogs', logId), {
+          ownerId,
+          branchId: params.branchId,
+          branchName: safeBranchName,
+          productId: item.product.id,
+          productSku: sanitizeCode(item.product.sku, SKU_MAX, 'SKU'),
+          productName: item.product.name.trim().slice(0, NAME_MAX) || 'Produk',
+          type: 'adjustment',
+          qtyDelta: cleanNextStock - prevStock,
+          stockBefore: prevStock,
+          stockAfter: cleanNextStock,
+          note: `${safeBaseNote} (${prevStock} -> ${cleanNextStock} pcs)`.slice(
+            0,
+            NOTE_MAX
+          ),
+          actorName: safeActorName,
+          createdAt: serverTimestamp(),
+        });
+
+        opsInBatch += 2;
+        updatedStocks += 1;
+      }
+
+      totalTouchedProducts += 1;
+    }
+
+    await flushBatch();
+    return { updatedPrices, updatedStocks, totalTouchedProducts };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'products/bulkUpdate');
+  }
+}
+
 /* ==================== BRANCH STOCKS (RESTOK / OPNAME) ==================== */
 
 export async function adjustBranchStockAtomic(

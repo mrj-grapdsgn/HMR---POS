@@ -7,6 +7,7 @@ import {
   Check,
   Download,
   FileSpreadsheet,
+  Layers,
   Package,
   Pencil,
   Plus,
@@ -44,7 +45,9 @@ import {
   normalizeBranchKey,
 } from '../utils/productCategory';
 import { parseTimestampMsFromTxCode } from '../utils/spreadsheetImport';
+import { BulkPriceStockUpdateItem } from '../services/posRepository';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
+import { BulkProductEditPanel } from './BulkProductEditPanel';
 import { ImportMigrationPanel } from './ImportMigrationPanel';
 import { InventoryBranchPanel } from './InventoryBranchPanel';
 import { RestockAnalyticsPanel } from './RestockAnalyticsPanel';
@@ -208,6 +211,15 @@ interface AdminDashboardProps {
     initialStockQty?: number;
   }) => Promise<void>;
   onDeleteProduct: (productId: string) => Promise<void>;
+  onBulkUpdatePriceAndStock: (params: {
+    branchId: string;
+    branchName: string;
+    items: BulkPriceStockUpdateItem[];
+  }) => Promise<{
+    updatedPrices: number;
+    updatedStocks: number;
+    totalTouchedProducts: number;
+  }>;
   onAutoCategorizeProducts: () => Promise<{ updatedCount: number }>;
   onSaveVoucher: (input: {
     id?: string;
@@ -255,6 +267,7 @@ export function AdminDashboard({
   onClearImportedSales,
   onSaveProduct,
   onDeleteProduct,
+  onBulkUpdatePriceAndStock,
   onAutoCategorizeProducts,
   onSaveVoucher,
   onDeleteVoucher,
@@ -305,6 +318,13 @@ export function AdminDashboard({
   const [prodSaving, setProdSaving] = useState(false);
   const [autoCatRunning, setAutoCatRunning] = useState(false);
   const [prodBarcodeScanOpen, setProdBarcodeScanOpen] = useState(false);
+  const [bulkEditMode, setBulkEditMode] = useState(false);
+
+  useEffect(() => {
+    if (activeTab !== 'products' && bulkEditMode) {
+      setBulkEditMode(false);
+    }
+  }, [activeTab, bulkEditMode]);
 
   useEffect(() => {
     if (!prodInitBranchId && branches.length > 0) {
@@ -970,7 +990,20 @@ export function AdminDashboard({
             )}
 
             {/* ================= TAB 4: KELOLA PRODUK ================= */}
-            {activeTab === 'products' && (
+            {activeTab === 'products' && bulkEditMode && (
+              <BulkProductEditPanel
+                products={products}
+                branches={branches}
+                branchStocks={branchStocks}
+                activeBranchId={activeBranchId}
+                categories={categorySuggestions}
+                onSaveBulk={onBulkUpdatePriceAndStock}
+                onClose={() => setBulkEditMode(false)}
+                onNotify={flashNotice}
+              />
+            )}
+
+            {activeTab === 'products' && !bulkEditMode && (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
                 {/* Product Form */}
                 <form
@@ -1160,6 +1193,15 @@ export function AdminDashboard({
                       Master Produk ({filteredProducts.length})
                     </span>
                     <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+                      <button
+                        type="button"
+                        disabled={products.length === 0}
+                        onClick={() => setBulkEditMode(true)}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#0F172A] px-3 text-[11px] font-bold text-white transition-colors hover:bg-[#1E293B] disabled:opacity-50 whitespace-nowrap"
+                      >
+                        <Layers className="h-3.5 w-3.5" />
+                        <span>Edit Massal Harga & Stok</span>
+                      </button>
                       <button
                         type="button"
                         disabled={autoCatRunning || products.length === 0}

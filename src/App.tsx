@@ -29,6 +29,7 @@ import { auth } from './firebase';
 import {
   adjustBranchStockAtomic,
   autoCategorizeProductsInFirestore,
+  bulkUpdateProductPriceAndStock,
   clearImportedSalesData,
   createTransactionAtomic,
   deleteBranchFromFirestore,
@@ -764,6 +765,13 @@ export default function App() {
             });
           }}
           onDeleteProduct={(id) => deleteProductFromFirestore(user.uid, id)}
+          onBulkUpdatePriceAndStock={(params) =>
+            bulkUpdateProductPriceAndStock(user.uid, {
+              ...params,
+              existingStocks: branchStocks,
+              actorName: activeCashierName,
+            })
+          }
           onAutoCategorizeProducts={() =>
             autoCategorizeProductsInFirestore(user.uid, products)
           }
